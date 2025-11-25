@@ -1,67 +1,88 @@
 // netlify/functions/call-greeting.js
+// Generates a unique voice greeting for call mode:
+// 1) Uses OpenAI to create a short, cinematic, fatherly greeting.
+// 2) Sends the text to ElevenLabs TTS.
+// 3) Returns { audio_base64, text, mime } as JSON.
 
-// Netlify Functions use Node 18+ by default, so global fetch is available.
+const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
+const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY || "";
+// Put your preferred voice ID in Netlify env as ELEVENLABS_VOICE_ID
+const ELEVENLABS_VOICE_ID = process.env.ELEVENLABS_VOICE_ID || ""; 
 
-export async function handler(event, context) {
-  if (event.httpMethod !== "POST") {
-    return {
-      statusCode: 405,
-      body: "Method Not Allowed",
-    };
-  }
+// Fallback voice model + settings (mirror your n8n node)
+const ELEVENLABS_MODEL_ID = process.env.ELEVENLABS_MODEL_ID || "eleven_turbo_v2_5";
+const DEFAULT_VOICE_SETTINGS = {
+  stability: 0.35,
+  similarity_boost: 0.92,
+  style: 0.55,
+  use_speaker_boost: true,
+};
 
+exports.handler = async function handler(event) {
   try {
-    const {
-      name,
-      // optional: you could pass sessionId, emotion, etc later if you want
-    } = JSON.parse(event.body || "{}");
-
-    const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-    const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
-
-    const ELEVEN_API_KEY = process.env.ELEVENLABS_API_KEY;
-    const ELEVEN_VOICE_ID = process.env.ELEVENLABS_VOICE_ID; // set this in Netlify
-    const ELEVEN_MODEL = process.env.ELEVENLABS_MODEL || "eleven_turbo_v2_5";
-
-    if (!OPENAI_API_KEY || !ELEVEN_API_KEY || !ELEVEN_VOICE_ID) {
-      console.error("Missing env vars for greeting");
+    if (event.httpMethod !== "POST") {
       return {
-        statusCode: 500,
-        body: "Server misconfigured (missing env vars).",
+        statusCode: 405,
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ error: "Method not allowed" }),
       };
     }
 
-    /* 1) Generate a UNIQUE greeting text with OpenAI */
-    const who = name ? `a man named ${name}` : "a son of God";
+    if (!OPENAI_API_KEY) {
+      console.error("[call-greeting] Missing OPENAI_API_KEY");
+      return {
+        statusCode: 500,
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ error: "Server misconfigured: OPENAI_API_KEY missing" }),
+      };
+    }
+    if (!ELEVENLABS_API_KEY || !ELEVENLABS_VOICE_ID) {
+      console.error("[call-greeting] Missing ElevenLabs API key or voice ID");
+      return {
+        statusCode: 500,
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          error: "Server misconfigured: ELEVENLABS_API_KEY or ELEVENLABS_VOICE_ID missing",
+        }),
+      };
+    }
 
+    // Optional: you *could* pass context in here later
+    let bodyJson = {};
+    try {
+      bodyJson = event.body ? JSON.parse(event.body) : {};
+    } catch (e) {
+      // ignore; not required for now
+    }
+    const callerName =
+      (bodyJson && typeof bodyJson.name === "string" && bodyJson.name.trim()) || "son";
+
+    // --- 1) Generate greeting text with OpenAI via raw fetch ---
     const systemPrompt = `
-You are Solomon Codex, a lion-hearted yet tender spiritual father.
-Generate a short voice greeting for the START of a live call with a man.
-
-Requirements:
-- 2–3 sentences maximum.
-- Warm, fatherly, and spiritually weighty.
-- Treat this as a war room / holy ground, not casual chat.
-- Speak directly to ${who}.
-- Each greeting must feel unique. Vary the imagery, wording, and cadence.
-- Do NOT mention that you are an AI or that this is a script.
-- Do NOT ask more than 1 question at the very end.
+You are the Solomon Codex AI Coach for Son of Wisdom.
+Generate a unique, cinematic, fatherly greeting for the START of a voice call.
+Speak directly to the man as "${callerName}" or "son".
+Tone: lion-hearted, tender, prophetic, and practical.
+Length: 2–4 sentences **max**, then end with ONE short, soul-peeling question that invites him
+to share where his heart really is right now.
+Do NOT mention that you are an AI, a model, or anything technical.
+Vary your metaphors, imagery, and language EVERY time so greetings never feel reused.
 `.trim();
 
     const userPrompt = `
-Create today's unique greeting for this live call. 
-Sound like a father forged in God's fire, welcoming his son into a war room, not a lounge.
+Create a fresh greeting now. The man just tapped "Call" and is hearing you for the first seconds.
 `.trim();
 
-    const openaiResp = await fetch("https://api.openai.com/v1/chat/completions", {
+    const openaiRes = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
       headers: {
-        "Authorization": `Bearer ${OPENAI_API_KEY}`,
+        Authorization: `Bearer ${OPENAI_API_KEY}`,
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
         model: OPENAI_MODEL,
-        temperature: 0.95, // keep it spicy so it varies each time
+        temperature: 0.9,
         messages: [
           { role: "system", content: systemPrompt },
           { role: "user", content: userPrompt },
@@ -69,72 +90,78 @@ Sound like a father forged in God's fire, welcoming his son into a war room, not
       }),
     });
 
-    if (!openaiResp.ok) {
-      const errText = await openaiResp.text();
-      console.error("OpenAI greeting error:", errText);
+    if (!openaiRes.ok) {
+      const errText = await openaiRes.text().catch(() => "");
+      console.error("[call-greeting] OpenAI error:", openaiRes.status, errText);
       return {
-        statusCode: 502,
-        body: "Failed to generate greeting text.",
+        statusCode: 500,
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          error: "Failed to generate greeting text",
+          details: `OpenAI ${openaiRes.status}`,
+        }),
       };
     }
 
-    const openaiData = await openaiResp.json();
+    const openaiJson = await openaiRes.json().catch(() => null);
     const greetingText =
-      openaiData?.choices?.[0]?.message?.content?.trim() ||
-      "Son, welcome. This is holy ground. Let's get to work.";
+      openaiJson?.choices?.[0]?.message?.content?.trim() ||
+      `Son, welcome. This is holy ground. Before we go further, tell me honestly: where is your heart right now?`;
 
-    console.log("[call-greeting] Greeting text:", greetingText);
+    // --- 2) Send greeting text to ElevenLabs for TTS audio ---
+    const ttsUrl = `https://api.elevenlabs.io/v1/text-to-speech/${ELEVENLABS_VOICE_ID}/stream?optimize_streaming_latency=0&output_format=mp3_22050_32`;
 
-    /* 2) Send greeting to ElevenLabs TTS */
-    const elevenUrl = `https://api.elevenlabs.io/v1/text-to-speech/${ELEVEN_VOICE_ID}/stream?optimize_streaming_latency=4&output_format=mp3_22050_32`;
-
-    const elevenBody = {
-      text: greetingText,
-      model_id: ELEVEN_MODEL,
-      voice_settings: {
-        stability: 0.3,
-        similarity_boost: 0.85,
-        style: 0.3,
-        use_speaker_boost: true,
-      },
+    const ttsBody = {
+      text: greetingText.slice(0, 5000), // just in case
+      model_id: ELEVENLABS_MODEL_ID,
+      voice_settings: DEFAULT_VOICE_SETTINGS,
     };
 
-    const elevenResp = await fetch(elevenUrl, {
+    const ttsRes = await fetch(ttsUrl, {
       method: "POST",
       headers: {
-        "xi-api-key": ELEVEN_API_KEY,
+        "xi-api-key": ELEVENLABS_API_KEY,
         "Content-Type": "application/json",
+        Accept: "audio/mpeg",
       },
-      body: JSON.stringify(elevenBody),
+      body: JSON.stringify(ttsBody),
     });
 
-    if (!elevenResp.ok) {
-      const errText = await elevenResp.text();
-      console.error("ElevenLabs error:", errText);
+    if (!ttsRes.ok) {
+      const errText = await ttsRes.text().catch(() => "");
+      console.error("[call-greeting] ElevenLabs error:", ttsRes.status, errText);
       return {
-        statusCode: 502,
-        body: "Failed to generate greeting audio.",
+        statusCode: 500,
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          error: "Failed to generate greeting audio",
+          details: `ElevenLabs ${ttsRes.status}`,
+        }),
       };
     }
 
-    const audioArrayBuffer = await elevenResp.arrayBuffer();
-    const audioBase64 = Buffer.from(audioArrayBuffer).toString("base64");
+    const audioBuffer = await ttsRes.arrayBuffer();
+    const audioBase64 = Buffer.from(audioBuffer).toString("base64");
 
-    // Netlify will decode base64 → binary for the client.
+    // --- 3) Return JSON with base64 audio ---
     return {
       statusCode: 200,
-      isBase64Encoded: true,
       headers: {
-        "Content-Type": "audio/mpeg",
+        "Content-Type": "application/json",
         "Cache-Control": "no-store",
       },
-      body: audioBase64,
+      body: JSON.stringify({
+        audio_base64: audioBase64,
+        mime: "audio/mpeg",
+        text: greetingText,
+      }),
     };
   } catch (err) {
-    console.error("call-greeting fatal error:", err);
+    console.error("[call-greeting] Unexpected error:", err);
     return {
       statusCode: 500,
-      body: "Server error generating greeting.",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ error: "Unexpected server error in greeting function" }),
     };
   }
-}
+};
