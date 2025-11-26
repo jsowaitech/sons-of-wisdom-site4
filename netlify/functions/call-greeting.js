@@ -59,7 +59,7 @@ exports.handler = async (event) => {
       : "";
 
     const userPrompt = `
-You are Solomon Codex, a lion-hearted yet lamb-like spiritual father.
+You are Blake, a lion-hearted yet lamb-like spiritual father.
 Generate a short SPOKEN greeting for a voice call (not text chat).
 
 Constraints:
@@ -84,7 +84,7 @@ ${summaryPart}
         {
           role: "system",
           content:
-            "You are Solomon Codex AI Coach, a spiritual father. Produce only the spoken greeting text. No extra explanations.",
+            "You are AI Blake, a spiritual father. Produce only the spoken greeting text. No extra explanations.",
         },
         {
           role: "user",
