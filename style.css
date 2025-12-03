@@ -616,7 +616,7 @@ body.chat-app .content {
   color: var(--text-gold);
 }
 
-/* Transcript */
+/* Transcript (live captions from call.js) */
 .call-transcript {
   margin-top: 0.7rem;
   width: 100%;
@@ -831,5 +831,277 @@ body.sow-shell main.content h2.tiny {
 
   .call-card {
     padding-inline: 1.1rem;
+  }
+}
+
+/* =========================================================
+   TRANSCRIPT PAGE
+   ========================================================= */
+
+.transcript-wrap {
+  max-width: 960px;
+  margin: 1.5rem auto 2.5rem;
+  padding: 1rem 1.2rem 1.2rem;
+  background: rgba(2, 6, 23, 0.98);
+  border-radius: 22px;
+  border: 1px solid var(--border-subtle);
+  box-shadow: var(--shadow-soft);
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+/* Header row */
+.ts-header {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.4);
+  padding-bottom: 0.6rem;
+}
+
+.ts-header .title-wrap {
+  flex: 1;
+}
+
+.ts-header h1 {
+  font-size: 1.1rem;
+  font-weight: 600;
+  color: var(--text-gold);
+  margin-bottom: 0.2rem;
+}
+
+.ts-header .sub {
+  font-size: 0.78rem;
+  color: var(--text-soft);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+/* Back button on transcript page */
+.ts-header .back-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0.45rem 0.75rem;
+  border-radius: 999px;
+  border: 1px solid var(--border-subtle);
+  background: rgba(15, 23, 42, 0.9);
+  color: var(--text-main);
+  font-size: 0.8rem;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.ts-header .back-btn:hover {
+  background: rgba(15, 23, 42, 1);
+  border-color: var(--accent);
+}
+
+/* LIVE badge */
+.live {
+  font-size: 0.7rem;
+  padding: 0.16rem 0.5rem;
+  border-radius: 999px;
+  border: 1px solid rgba(248, 113, 113, 0.5);
+  color: #fecaca;
+  background: rgba(127, 29, 29, 0.55);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.live.is-live {
+  box-shadow: 0 0 16px rgba(248, 113, 113, 0.7);
+}
+
+/* Right-side header actions */
+.ts-header .actions {
+  display: flex;
+  gap: 0.35rem;
+}
+
+.ts-header .actions .ghost {
+  font-size: 0.78rem;
+  padding: 0.35rem 0.8rem;
+  border-radius: 999px;
+  border: 1px solid var(--border-subtle);
+  background: rgba(15, 23, 42, 0.9);
+  color: var(--text-main);
+}
+
+/* Transcript list */
+.ts-list {
+  flex: 1;
+  margin-top: 0.5rem;
+  padding: 0.7rem 0.4rem 0.4rem;
+  border-radius: 16px;
+  background: rgba(2, 6, 23, 0.95);
+  border: 1px solid rgba(30, 64, 175, 0.7);
+  box-shadow: inset 0 0 16px rgba(15, 23, 42, 0.9);
+  overflow-y: auto;
+}
+
+/* Individual turns */
+.turn {
+  margin-bottom: 0.65rem;
+}
+
+.turn .bubble {
+  width: fit-content;
+  max-width: 100%;
+}
+
+/* User vs AI styling for transcript bubbles */
+.turn.user .bubble {
+  margin-left: auto;
+  background: linear-gradient(135deg, var(--accent), var(--accent-strong));
+  color: var(--text-inverse);
+  border-radius: 14px;
+  border-bottom-right-radius: 4px;
+}
+
+.turn.assistant .bubble {
+  margin-right: auto;
+  background: rgba(15, 23, 42, 0.94);
+  border-radius: 14px;
+  border-bottom-left-radius: 4px;
+  border: 1px solid var(--border-subtle);
+}
+
+/* Meta line (role + time) */
+.turn .meta {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 0.5rem;
+  margin-bottom: 0.18rem;
+  font-size: 0.75rem;
+}
+
+.turn .meta .role {
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  font-weight: 500;
+  opacity: 0.9;
+}
+
+.turn.assistant .meta .role {
+  color: var(--text-gold);
+}
+
+.turn.user .meta .role {
+  color: #1f2933;
+}
+
+.turn .meta .time {
+  color: rgba(148, 163, 184, 0.9);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Text body */
+.turn .text {
+  font-size: 0.86rem;
+  line-height: 1.45;
+  white-space: pre-wrap;
+}
+
+/* Audio player inside transcript bubble */
+.turn audio {
+  margin-top: 0.25rem;
+  width: 100%;
+}
+
+/* Footer controls */
+.ts-footer {
+  margin-top: 0.75rem;
+  border-top: 1px solid rgba(148, 163, 184, 0.4);
+  padding-top: 0.6rem;
+}
+
+.ts-footer .row {
+  width: 100%;
+}
+
+.ts-footer span {
+  font-size: 0.8rem;
+  color: var(--text-soft);
+}
+
+.ts-footer input.mono {
+  flex: 1;
+  min-width: 0;
+  padding: 0.45rem 0.6rem;
+  border-radius: 999px;
+  border: 1px solid rgba(30, 64, 175, 0.9);
+  background: rgba(15, 23, 42, 0.96);
+  color: var(--text-main);
+  font-family: "SF Mono", ui-monospace, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  font-size: 0.8rem;
+}
+
+.ts-footer button.primary {
+  font-size: 0.8rem;
+  padding: 0.45rem 0.9rem;
+  border-radius: 999px;
+  border: 1px solid rgba(0, 0, 0, 0.6);
+  background: linear-gradient(135deg, var(--accent), var(--accent-strong));
+  color: var(--text-inverse);
+}
+
+.ts-footer .hint {
+  display: block;
+  margin-top: 0.4rem;
+  font-size: 0.75rem;
+  color: var(--text-soft);
+}
+
+.ts-footer .hint code {
+  font-family: "SF Mono", ui-monospace, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  font-size: 0.73rem;
+  color: var(--text-gold);
+}
+
+/* =========================================================
+   CALL + TRANSCRIPT SPLIT LAYOUT
+   ========================================================= */
+
+.page-call .content.call-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.1fr);
+  gap: 1rem;
+  align-items: flex-start;
+}
+
+/* Right-hand transcript panel (iframe) */
+.call-side-transcript {
+  background: rgba(2, 6, 23, 0.96);
+  border-radius: 22px;
+  border: 1px solid var(--border-subtle);
+  padding: 0.9rem;
+  box-shadow: var(--shadow-soft);
+  min-height: 260px;
+  max-height: calc(100vh - 260px);
+  display: flex;
+  flex-direction: column;
+}
+
+.call-side-transcript iframe {
+  width: 100%;
+  height: 100%;
+  border: none;
+  border-radius: 16px;
+}
+
+/* Stack vertically on smaller screens */
+@media (max-width: 900px) {
+  .page-call .content.call-layout {
+    display: block;
+  }
+
+  .call-side-transcript {
+    margin-top: 1rem;
+    max-height: 340px;
   }
 }

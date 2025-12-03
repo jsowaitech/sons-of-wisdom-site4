@@ -1,42 +1,33 @@
 <!DOCTYPE html>
 <html lang="en">
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Transcript</title>
-  <link rel="stylesheet" href="./style.css" />
-</head>
-<body>
-  <main id="app" class="transcript-wrap">
-    <header class="ts-header">
-      <a href="./home.html" class="back-btn">← Home</a>
-      <div class="title-wrap">
-        <h1>Conversation Transcript</h1>
-        <div class="sub">
-          <span id="callIdLabel">call_id: —</span>
-          <span class="live" id="liveBadge" aria-live="polite">LIVE</span>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Live Transcription</title>
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body class="ts-live">
+    <main id="app" class="transcript-wrap live">
+      <header class="ts-header live">
+        <div class="title-left">
+          <span class="dot"></span>
+          <span class="title">Live Transcription</span>
         </div>
-      </div>
-      <div class="actions">
-        <button id="copyBtn" class="ghost">Copy</button>
-        <button id="downloadBtn" class="ghost">Download</button>
-      </div>
-    </header>
+        <button id="closeBtn" class="ghost" aria-label="Close">
+          ✕
+        </button>
+      </header>
 
-    <section id="turnList" class="ts-list" aria-live="polite" aria-atomic="false"></section>
+      <section
+        id="turnList"
+        class="ts-list"
+        aria-live="polite"
+        aria-atomic="false"
+      ></section>
 
-    <footer class="ts-footer">
-      <label class="row">
-        <span>Call ID</span>
-        <input id="callIdInput" class="mono" placeholder="uuid…" />
-        <button id="watchBtn" class="primary">Watch</button>
-      </label>
-      <small class="hint">
-        If empty, we’ll use <code>localStorage.last_call_id</code>. This page listens to <code>public.call_sessions</code>.
-      </small>
-    </footer>
-  </main>
+      <button id="autoScrollBtn" class="auto-scroll">Auto scroll</button>
+    </main>
 
-  <script type="module" src="./app/transcript.js"></script>
-</body>
+    <script type="module" src="./app/transcript.js"></script>
+  </body>
 </html>

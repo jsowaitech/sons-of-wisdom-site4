@@ -1,13 +1,15 @@
-// netlify/functions/chat.js
-// Son of Wisdom — Unified Chat/Voice function with:
-// - OpenAI + Pinecone RAG
-// - Supabase conversation memory (conversations + conversation_messages)
-// - Rolling summary per conversation
-// - Optional ElevenLabs TTS for voice mode
+// netlify/functions/call-coach.js
+// Son of Wisdom — Call-mode coach
+// Replaces n8n workflow for voice calls:
+//  - Receives transcript + context (including call_id)
+//  - Pinecone RAG + OpenAI Blake
+//  - ElevenLabs TTS
+//  - Logs into public.call_sessions using call_id
+//  - Returns JSON { text, audio_base64, mime } for call.js to play
 
 const { Pinecone } = require("@pinecone-database/pinecone");
 
-// ---------- ENV ----------
+/* ---------- ENV ---------- */
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
 const OPENAI_EMBED_MODEL =
@@ -22,7 +24,9 @@ const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const SUPABASE_REST = SUPABASE_URL ? `${SUPABASE_URL}/rest/v1` : null;
 
 const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY || "";
-const ELEVENLABS_VOICE_ID = process.env.ELEVENLABS_VOICE_ID || ""; // Blake voice id
+const ELEVENLABS_VOICE_ID = process.env.ELEVENLABS_VOICE_ID || "";
+
+const SENTINEL_UUID = "00000000-0000-0000-0000-000000000000";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -30,7 +34,14 @@ const corsHeaders = {
   "Access-Control-Allow-Methods": "POST, OPTIONS",
 };
 
-// ---------- CORE SYSTEM PROMPT (Blake) ----------
+/* ---------- Helpers ---------- */
+function isUuid(v) {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+    v || ""
+  );
+}
+
+/* ---------- Blake system prompt (same as chat.js) ---------- */
 const SYSTEM_PROMPT_BLAKE = `
 AI BLAKE – SON OF WISDOM COACH
 TTS-SAFE • CONVERSATIONAL • DIAGNOSTIC-FIRST • SHORT RESPONSES • VARIATION • NO DEEP-DIVE
@@ -292,7 +303,7 @@ Style:
 
 Length:
 - Diagnostic replies: under 120 words, mostly questions.
-- Micro-guidance replies: about 90–160 words, hard max 190.
+- Micro-guidance replies: about 90 to 160 words, hard max 190.
 - No automatic deep-dive sermons.
 
 
@@ -317,7 +328,7 @@ In every answer you:
 All of this must be delivered in TTS-safe plain text, without markdown symbols, lists, headings, or escape sequences in your responses.
 `.trim();
 
-// ---------- PINECONE SETUP ----------
+/* ---------- Pinecone ---------- */
 let pineconeClient = null;
 let pineconeIndex = null;
 
@@ -330,7 +341,6 @@ function ensurePinecone() {
   return pineconeIndex;
 }
 
-// ---------- OPENAI HELPERS ----------
 async function openaiEmbedding(text) {
   if (!OPENAI_API_KEY) throw new Error("Missing OPENAI_API_KEY");
 
@@ -385,10 +395,9 @@ async function openaiChat(messages, opts = {}) {
   return data?.choices?.[0]?.message?.content?.trim() || "";
 }
 
-// ---------- PINECONE RAG ----------
-function buildKBQuery(userMessage) {
-  if (!userMessage) return "";
-  const words = userMessage.toString().split(/\s+/).filter(Boolean);
+function buildKBQuery(transcript) {
+  if (!transcript) return "";
+  const words = transcript.toString().split(/\s+/).filter(Boolean);
   return words.slice(0, 12).join(" ");
 }
 
@@ -417,31 +426,21 @@ async function getKnowledgeContext(question, topK = 10) {
       .sort((a, b) => (b.score || 0) - (a.score || 0))
       .map((m) => {
         const md = m.metadata || {};
-        return (
-          md.text ||
-          md.chunk ||
-          md.content ||
-          md.body ||
-          ""
-        );
+        return md.text || md.chunk || md.content || md.body || "";
       })
       .filter(Boolean);
 
     if (!chunks.length) return "";
-
     const joined = chunks.join("\n\n---\n\n");
     return joined.slice(0, 4000);
   } catch (err) {
-    console.error("[chat] getKnowledgeContext error:", err);
+    console.error("[call-coach] getKnowledgeContext error:", err);
     return "";
   }
 }
 
-// ---------- SUPABASE HELPERS ----------
-async function supaFetch(
-  path,
-  { method = "GET", headers = {}, query, body } = {}
-) {
+/* ---------- Supabase helper ---------- */
+async function supaFetch(path, { method = "GET", headers = {}, query, body } = {}) {
   if (!SUPABASE_REST || !SUPABASE_SERVICE_ROLE_KEY) return null;
 
   const url = new URL(`${SUPABASE_REST}/${path}`);
@@ -464,7 +463,7 @@ async function supaFetch(
   if (!res.ok) {
     const txt = await res.text().catch(() => "");
     console.error(
-      `[chat] Supabase ${method} ${path} ${res.status}:`,
+      `[call-coach] Supabase ${method} ${path} ${res.status}:`,
       txt || res.statusText
     );
     throw new Error(`Supabase ${method} ${path} ${res.status}`);
@@ -479,191 +478,7 @@ async function supaFetch(
   }
 }
 
-async function fetchConversation(conversationId) {
-  if (!conversationId) return null;
-  const rows = await supaFetch("conversations", {
-    query: {
-      select: "id,user_id,title,summary,updated_at,last_updated_at",
-      id: `eq.${conversationId}`,
-      limit: "1",
-    },
-  });
-  if (!Array.isArray(rows) || !rows.length) return null;
-  return rows[0];
-}
-
-async function fetchRecentMessages(conversationId, limit = 12) {
-  if (!conversationId) return [];
-  const rows = await supaFetch("conversation_messages", {
-    query: {
-      select: "role,content,created_at",
-      conversation_id: `eq.${conversationId}`,
-      order: "created_at.desc",
-      limit: String(limit),
-    },
-  });
-  if (!Array.isArray(rows)) return [];
-  // sort oldest → newest
-  return rows
-    .slice()
-    .sort(
-      (a, b) =>
-        new Date(a.created_at).getTime() - new Date(b.created_at).getTime()
-    );
-}
-
-async function insertConversationMessages(
-  conversation,
-  conversationId,
-  userText,
-  assistantText
-) {
-  if (!conversation || !conversationId || !conversation.user_id) return;
-
-  const nowIso = new Date().toISOString();
-  const rows = [
-    {
-      conversation_id: conversationId,
-      user_id: conversation.user_id,
-      role: "user",
-      content: userText,
-      created_at: nowIso,
-    },
-    {
-      conversation_id: conversationId,
-      user_id: conversation.user_id,
-      role: "assistant",
-      content: assistantText,
-      created_at: nowIso,
-    },
-  ];
-
-  await supaFetch("conversation_messages", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Prefer: "return=minimal",
-    },
-    body: JSON.stringify(rows),
-  });
-
-  await supaFetch("conversations", {
-    method: "PATCH",
-    headers: {
-      "Content-Type": "application/json",
-      Prefer: "return=minimal",
-    },
-    query: { id: `eq.${conversationId}` },
-    body: JSON.stringify({
-      updated_at: nowIso,
-      last_updated_at: nowIso,
-    }),
-  });
-}
-
-function makeConversationTitleFromText(text, maxLen = 80) {
-  const clean = (text || "").replace(/\s+/g, " ").trim();
-  if (!clean) return "New Conversation";
-  let t = clean;
-  if (t.length > maxLen) t = t.slice(0, maxLen - 1) + "…";
-  return t.charAt(0).toUpperCase() + t.slice(1);
-}
-
-async function maybeUpdateConversationTitle(
-  conversation,
-  conversationId,
-  firstUserMessage
-) {
-  if (!conversation || !conversationId || !firstUserMessage) return;
-  const current = (conversation.title || "").trim();
-  if (current && current !== "New Conversation") return;
-
-  const newTitle = makeConversationTitleFromText(firstUserMessage);
-  const nowIso = new Date().toISOString();
-
-  await supaFetch("conversations", {
-    method: "PATCH",
-    headers: {
-      "Content-Type": "application/json",
-      Prefer: "return=minimal",
-    },
-    query: { id: `eq.${conversationId}` },
-    body: JSON.stringify({
-      title: newTitle,
-      updated_at: nowIso,
-      last_updated_at: nowIso,
-    }),
-  });
-}
-
-async function buildRollingSummary(existingSummary, messages) {
-  const prev = (existingSummary || "").trim();
-  if (!messages || !messages.length) return prev;
-
-  const historyText = messages
-    .map((m) => `${m.role === "user" ? "User" : "Coach"}: ${m.content}`)
-    .join("\n");
-
-  const sys =
-    "You write a short rolling summary (2–4 sentences, max 500 characters) of an ongoing coaching conversation between a man and his coach. Capture his situation, patterns, and current goals in simple language. Do NOT mention that this is a summary.";
-  const user = `
-Previous summary (may be empty):
-${prev || "(none)"}
-
-Recent messages (oldest to newest):
-${historyText}
-
-Update the summary now, staying under 500 characters.
-`.trim();
-
-  const summary = await openaiChat(
-    [
-      { role: "system", content: sys },
-      { role: "user", content: user },
-    ],
-    { temperature: 0.2, maxTokens: 220 }
-  );
-
-  return (summary || "").slice(0, 500);
-}
-
-async function updateConversationSummary(
-  conversation,
-  conversationId,
-  priorMessages,
-  newUserText,
-  newAssistantText
-) {
-  if (!conversation || !conversationId) return conversation?.summary || null;
-  try {
-    const base = Array.isArray(priorMessages) ? priorMessages.slice() : [];
-    base.push({ role: "user", content: newUserText });
-    base.push({ role: "assistant", content: newAssistantText });
-
-    const newSummary = await buildRollingSummary(conversation.summary, base);
-
-    const nowIso = new Date().toISOString();
-    await supaFetch("conversations", {
-      method: "PATCH",
-      headers: {
-        "Content-Type": "application/json",
-        Prefer: "return=minimal",
-      },
-      query: { id: `eq.${conversationId}` },
-      body: JSON.stringify({
-        summary: newSummary,
-        last_updated_at: nowIso,
-      }),
-    });
-
-    return newSummary;
-  } catch (e) {
-    console.error("[chat] updateConversationSummary error:", e);
-    return conversation.summary || null;
-  }
-}
-
-// ---------- ELEVENLABS TTS ----------
+/* ---------- ElevenLabs TTS ---------- */
 async function elevenLabsTTS(text) {
   if (!ELEVENLABS_API_KEY || !ELEVENLABS_VOICE_ID) return null;
   const trimmed = (text || "").trim();
@@ -690,7 +505,11 @@ async function elevenLabsTTS(text) {
 
   if (!res.ok) {
     const t = await res.text().catch(() => "");
-    console.error("[chat] ElevenLabs TTS error:", res.status, t || res.statusText);
+    console.error(
+      "[call-coach] ElevenLabs TTS error:",
+      res.status,
+      t || res.statusText
+    );
     return null;
   }
 
@@ -702,7 +521,7 @@ async function elevenLabsTTS(text) {
   };
 }
 
-// ---------- NETLIFY HANDLER ----------
+/* ---------- Handler ---------- */
 exports.handler = async (event) => {
   if (event.httpMethod === "OPTIONS") {
     return { statusCode: 204, headers: corsHeaders, body: "" };
@@ -718,51 +537,33 @@ exports.handler = async (event) => {
 
   try {
     const body = JSON.parse(event.body || "{}");
-    const userMessage = (body.message || "").toString().trim();
-    const meta = body.meta || {};
+    const source = (body.source || "voice").toLowerCase();
+    const userIdRaw = (body.user_id || "").toString();
+    const deviceId = (body.device_id || "").toString() || null;
+    const callId = (body.call_id || "").toString() || null;
+    const transcript = (body.transcript || "").toString().trim();
+    const rollingSummary = (body.rolling_summary || "").toString().trim();
+    const historyLast3 = Array.isArray(body.history_user_last3)
+      ? body.history_user_last3
+      : [];
 
-    if (!userMessage) {
+    if (!transcript) {
       return {
         statusCode: 400,
         headers: corsHeaders,
-        body: JSON.stringify({ error: "Missing message" }),
+        body: JSON.stringify({ error: "Missing transcript" }),
       };
     }
 
-    const source = (meta.source || "chat").toLowerCase(); // "chat" or "voice"
-    const conversationId = meta.conversationId || null;
+    const userIdUuid = isUuid(userIdRaw) ? userIdRaw : SENTINEL_UUID;
 
-    // 1) Supabase: fetch conversation + recent messages
-    let conversation = null;
-    let recentMessages = [];
-    if (SUPABASE_REST && SUPABASE_SERVICE_ROLE_KEY && conversationId) {
-      try {
-        conversation = await fetchConversation(conversationId);
-        recentMessages = await fetchRecentMessages(conversationId, 12);
-      } catch (e) {
-        console.error("[chat] Supabase fetch error:", e);
-      }
-    }
-
-    const historySnippet = recentMessages.length
-      ? recentMessages
-          .map(
-            (m) =>
-              `${m.role === "user" ? "User" : "Coach"}: ${m.content || ""}`
-          )
-          .join("\n")
-      : "—";
-
-    const rollingSummary = (conversation && conversation.summary) || "—";
-
-    // 2) Pinecone KB context
-    const kbQuery = buildKBQuery(userMessage);
+    // 1) Pinecone context
+    const kbQuery = buildKBQuery(transcript);
     const kbContext = await getKnowledgeContext(kbQuery);
     const usedKnowledge = Boolean(kbContext && kbContext.trim());
 
-    // 3) Build messages
+    // 2) Build messages for Blake
     const messages = [];
-
     messages.push({ role: "system", content: SYSTEM_PROMPT_BLAKE });
 
     const kbInstruction = `
@@ -787,81 +588,61 @@ ${kbContext || "No relevant Son of Wisdom knowledge base passages were retrieved
     messages.push({ role: "system", content: kbInstruction });
 
     const memoryInstruction = `
-Conversation memory context for this thread.
+Conversation memory for this call.
 
 Rolling summary:
-${rollingSummary}
+${rollingSummary || "—"}
 
-Recent history (oldest to newest):
-${historySnippet}
+Recent user lines (up to last 3, newest last):
+${historyLast3.join("\n") || "—"}
 
-Use this context to stay consistent with what has already been shared. Do not read this back to the user.
+Use this only to stay consistent with what he has already shared. Do not read this back to him.
 `.trim();
 
     messages.push({ role: "system", content: memoryInstruction });
 
-    messages.push({ role: "user", content: userMessage });
+    messages.push({ role: "user", content: transcript });
 
-    // 4) Call OpenAI
+    // 3) OpenAI
     const reply = await openaiChat(messages);
 
-    // 5) Supabase logging
-    let updatedSummary = rollingSummary === "—" ? null : rollingSummary;
-    if (
-      SUPABASE_REST &&
-      SUPABASE_SERVICE_ROLE_KEY &&
-      conversation &&
-      conversationId
-    ) {
-      try {
-        await insertConversationMessages(
-          conversation,
-          conversationId,
-          userMessage,
-          reply
-        );
+    // 4) ElevenLabs TTS
+    const audio = await elevenLabsTTS(reply);
 
-        if (!recentMessages.length) {
-          await maybeUpdateConversationTitle(
-            conversation,
-            conversationId,
-            userMessage
-          );
-        }
+    // 5) Supabase logging into call_sessions
+    try {
+      const nowIso = new Date().toISOString();
+      const row = {
+        user_id_uuid: userIdUuid,
+        device_id: deviceId,
+        call_id: callId,
+        input_transcript: transcript,
+        ai_text: reply,
+        timestamp: nowIso,
+      };
 
-        updatedSummary = await updateConversationSummary(
-          conversation,
-          conversationId,
-          recentMessages,
-          userMessage,
-          reply
-        );
-      } catch (e) {
-        console.error("[chat] Supabase logging error:", e);
-      }
+      await supaFetch("call_sessions", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Prefer: "return=minimal",
+        },
+        body: JSON.stringify([row]),
+      });
+    } catch (e) {
+      console.error("[call-coach] Supabase call_sessions insert error:", e);
+      // continue; don't fail the whole response
     }
 
-    // 6) Optional TTS for voice mode
-    let audio = null;
-    if (source === "voice") {
-      try {
-        audio = await elevenLabsTTS(reply);
-      } catch (e) {
-        console.error("[chat] ElevenLabs TTS error:", e);
-      }
-    }
-
-    // 7) Response
+    // 6) JSON response compatible with existing call.js
     const responseBody = {
-      reply,
+      text: reply,
       usedKnowledge,
-      conversationId: conversationId || null,
-      summary: updatedSummary || null,
     };
 
     if (audio && audio.audio_base64) {
       responseBody.audio_base64 = audio.audio_base64;
-      responseBody.audio_mime = audio.mime || "audio/mpeg";
+      responseBody.mime = audio.mime || "audio/mpeg";
     }
 
     return {
@@ -873,7 +654,7 @@ Use this context to stay consistent with what has already been shared. Do not re
       body: JSON.stringify(responseBody),
     };
   } catch (err) {
-    console.error("[chat] handler error:", err);
+    console.error("[call-coach] handler error:", err);
     return {
       statusCode: 500,
       headers: corsHeaders,

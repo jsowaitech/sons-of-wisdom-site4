@@ -1,6 +1,6 @@
 // app/call.js
 // Son of Wisdom — Call mode
-// - Continuous VAD recording → Supabase (optional) + n8n → AI audio reply
+// - Continuous VAD recording → Supabase (optional) + Netlify call-coach → AI audio reply
 // - Web Speech API captions + optional Hume realtime (safely stubbed)
 // - Dynamic AI greeting audio via Netlify function + ElevenLabs
 // - Conversation threads: can title an untitled conversation from first transcript
@@ -45,13 +45,16 @@ const HISTORY_TIME_COL = "timestamp";
 const SUMMARY_TABLE = "history_summaries";
 const SUMMARY_MAX_CHARS = 380;
 
-/* ---------- n8n webhooks ---------- */
-/** Text + voice coach logic lives here (transcript only). */
+/* ---------- n8n webhooks / Netlify endpoints ---------- */
+/** Text chat logic still uses n8n for now. */
 const N8N_WEBHOOK_URL =
   "https://jsonofwisdom.app.n8n.cloud/webhook/4877ebea-544b-42b4-96d6-df41c58d48b0";
 
 /* Optional: AI-transcript webhook (leave empty to disable) */
 const N8N_TRANSCRIBE_URL = "";
+
+/** NEW: Local hard-coded replacement for n8n voice workflow */
+const CALL_COACH_ENDPOINT = "/.netlify/functions/call-coach";
 
 /* ---------- Netlify / ElevenLabs greeting ---------- */
 const GREETING_ENDPOINT = "/.netlify/functions/call-greeting";
@@ -65,6 +68,9 @@ const ENABLE_STREAMED_PLAYBACK = true;
 const USER_ID_KEY = "sow_user_id";
 const DEVICE_ID_KEY = "sow_device_id";
 const SENTINEL_UUID = "00000000-0000-0000-0000-000000000000";
+
+/** NEW: the current call session id (used for transcript mode) */
+let currentCallId = null;
 
 const isUuid = (v) =>
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
@@ -787,6 +793,21 @@ async function prepareGreetingForNextCall() {
 async function startCall() {
   if (isCalling) return;
   isCalling = true;
+
+  // NEW: create a call_id for this session and store it
+  try {
+    currentCallId = crypto.randomUUID();
+  } catch {
+    currentCallId = `call_${Date.now()}_${Math.random()
+      .toString(36)
+      .slice(2)}`;
+  }
+  try {
+    localStorage.setItem("last_call_id", currentCallId);
+  } catch (e) {
+    // ignore storage errors
+  }
+
   callBtn.classList.add("call-active");
   transcriptUI.clearAll();
   showCallView();
@@ -1245,7 +1266,7 @@ async function playAIWithBargeIn(
   });
 }
 
-/* ---------- Voice path: upload → Supabase (optional) → n8n (transcript only) ---------- */
+/* ---------- Voice path: upload → Supabase (optional) → call-coach (transcript only) ---------- */
 const RECENT_USER_KEEP = 12;
 let recentUserTurns = [];
 
@@ -1266,6 +1287,20 @@ async function uploadRecordingAndNotify() {
 
   const user_id = getUserIdForWebhook();
   const device = getOrCreateDeviceId();
+
+  // NEW: ensure we always have a call_id and keep it persisted
+  if (!currentCallId) {
+    try {
+      currentCallId =
+        localStorage.getItem("last_call_id") || crypto.randomUUID();
+      localStorage.setItem("last_call_id", currentCallId);
+    } catch {
+      currentCallId =
+        currentCallId ||
+        `call_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+    }
+  }
+
   const mimeType = mediaRecorder?.mimeType || "audio/webm";
   const blob = new Blob(recordChunks, { type: mimeType });
   if (!blob.size || !isCalling) {
@@ -1327,7 +1362,7 @@ async function uploadRecordingAndNotify() {
     log("Skipping Supabase upload; HAS_SUPABASE is false.");
   }
 
-  // call n8n (expects BINARY audio back) — transcript only
+  // call Netlify call-coach (hard-coded workflow)
   let aiPlayableUrl = null;
   let revokeLater = null;
   let aiBlob = null;
@@ -1335,6 +1370,8 @@ async function uploadRecordingAndNotify() {
   try {
     const body = {
       user_id,
+      device_id: device,
+      call_id: currentCallId, // NEW: attach call_id so transcript mode can follow
       transcript: transcriptForModel,
       has_transcript: !!transcriptForModel,
       history_user_last3: recentUserTurns.slice(-3),
@@ -1344,7 +1381,7 @@ async function uploadRecordingAndNotify() {
       audio_uploaded: uploaded,
     };
 
-    const resp = await fetch(N8N_WEBHOOK_URL, {
+    const resp = await fetch(CALL_COACH_ENDPOINT, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
@@ -1352,7 +1389,7 @@ async function uploadRecordingAndNotify() {
 
     const ct = (resp.headers.get("content-type") || "").toLowerCase();
 
-    // progressive stream first
+    // progressive stream first (kept for compatibility; call-coach currently returns JSON)
     if (
       ENABLE_STREAMED_PLAYBACK &&
       ct.includes("audio/webm") &&
