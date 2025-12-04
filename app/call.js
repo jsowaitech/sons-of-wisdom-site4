@@ -109,6 +109,7 @@ const pickUuidForHistory = (user_id) =>
 /* ---------- DOM ---------- */
 const callBtn = document.getElementById("call-btn");
 const statusText = document.getElementById("status-text");
+const callTimerEl = document.getElementById("call-timer");
 const voiceRing = document.getElementById("voiceRing");
 const micBtn = document.getElementById("mic-btn");
 const speakerBtn = document.getElementById("speaker-btn");
@@ -132,6 +133,9 @@ let isCalling = false;
 let isRecording = false;
 let isPlayingAI = false;
 let inChatView = false; // no longer toggled by mode button, but kept for compatibility
+
+let callStartedAt = null;
+let callTimerInterval = null;
 
 let globalStream = null;
 let mediaRecorder = null;
@@ -157,6 +161,45 @@ let greetingAudioUrl = null;
 const log = (...a) => DEBUG && console.log("[SOW]", ...a);
 const warn = (...a) => DEBUG && console.warn("[SOW]", ...a);
 const trimText = (s, n = 360) => (s || "").trim().slice(0, n);
+
+// Call duration timer helpers
+function resetCallTimer() {
+  // Full reset: used on page load and before a *new* call
+  callStartedAt = null;
+  if (callTimerInterval) {
+    clearInterval(callTimerInterval);
+    callTimerInterval = null;
+  }
+  if (callTimerEl) {
+    callTimerEl.textContent = "00:00";
+  }
+}
+
+function stopCallTimer() {
+  // Stop ticking but keep whatever time is currently shown
+  if (callTimerInterval) {
+    clearInterval(callTimerInterval);
+    callTimerInterval = null;
+  }
+}
+
+function updateCallTimer() {
+  if (!callTimerEl || !callStartedAt) return;
+  const elapsedSec = Math.floor((Date.now() - callStartedAt) / 1000);
+  const mins = Math.floor(elapsedSec / 60);
+  const secs = elapsedSec % 60;
+  const mm = String(mins).padStart(2, "0");
+  const ss = String(secs).padStart(2, "0");
+  callTimerEl.textContent = `${mm}:${ss}`;
+}
+
+function startCallTimer() {
+  // New call: reset to 00:00 and start counting
+  resetCallTimer();
+  callStartedAt = Date.now();
+  updateCallTimer();
+  callTimerInterval = setInterval(updateCallTimer, 1000);
+}
 
 /* Derive a short conversation title from first user utterance */
 function deriveTitleFromText(raw) {
@@ -811,6 +854,7 @@ async function startCall() {
   callBtn.classList.add("call-active");
   transcriptUI.clearAll();
   showCallView();
+  startCallTimer();
 
   try {
     statusText.textContent = "Ringing…";
@@ -848,6 +892,9 @@ async function startCall() {
   } catch (e) {
     warn("startCall error", e);
     statusText.textContent = "Audio blocked or missing. Tap again.";
+    resetCallTimer();
+    isCalling = false;
+    callBtn.classList.remove("call-active");
   }
 }
 
@@ -857,6 +904,7 @@ function endCall() {
   isPlayingAI = false;
   callBtn.classList.remove("call-active");
   statusText.textContent = "Call ended.";
+  stopCallTimer();
   stopMicVAD();
   stopRing();
   stopBargeInMonitor();
@@ -1739,5 +1787,6 @@ updateMicUI();
 updateSpeakerUI();
 updateModeBtnUI();
 showCallView();
+resetCallTimer();
 prepareGreetingForNextCall();
 log("[SOW] call.js ready");

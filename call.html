@@ -10,7 +10,7 @@
 <body class="sow-shell page-call">
   <!-- App bar -->
   <header class="appbar">
-    <!-- Simple back to main chat (fresh) -->
+    <!-- Back to main chat (fresh) -->
     <button
       id="btn-back-home"
       class="icon-btn"
@@ -25,10 +25,10 @@
       powered by <span class="brand-mini">Son of Wisdom</span>
     </div>
 
-    <!-- This link will be wired by call.js once we know conversationId -->
+    <!-- This gets wired by call.js once we know conversationId -->
     <a
-      id="back-to-thread"
-      class="btn pill small"
+      id="thread-link"
+      class="btn small"
       href="#"
       style="display:none;"
     >
@@ -36,91 +36,106 @@
     </a>
   </header>
 
-  <!-- Main content -->
-  <main class="content call-main" role="main">
-    <section class="hero-mini">
-      <h1 class="hero-mini-title">Call with AI Blake</h1>
-      <p class="hero-mini-tagline">Voice-to-voice coaching for the warrior heart.</p>
+  <!-- Main content: call card + right-hand transcript panel -->
+  <main class="content call-layout" role="main">
+    <!-- Left: call card -->
+    <section class="call-main">
+      <section class="hero-mini">
+        <h1 class="hero-mini-title">Call with AI Blake</h1>
+        <p class="hero-mini-tagline">
+          Voice-to-voice coaching for the warrior heart.
+        </p>
+      </section>
+
+      <section>
+        <div class="call-card">
+          <!-- Avatar + animated ring -->
+          <div class="call-avatar-wrap" id="avatar-container">
+            <canvas id="voiceRing"></canvas>
+            <!-- Replace src with your actual avatar asset -->
+            <img
+              src="avatar-blake.jpg"
+              alt="AI Blake"
+              class="call-avatar-img"
+            />
+          </div>
+
+          <!-- Status + timer -->
+          <div class="call-status">
+            <span id="status-text">Tap the blue call button to begin.</span>
+          </div>
+          <div class="call-timer" id="call-timer">00:00</div>
+
+          <!-- Transcript container (kept for JS hooks, hidden via CSS) -->
+          <div id="transcript" class="call-transcript">
+            <div id="transcript-list" class="transcript-list"></div>
+            <div id="transcript-interim" class="transcript-interim"></div>
+          </div>
+
+          <!-- Call controls -->
+          <div class="call-controls">
+            <button
+              id="call-btn"
+              class="btn circle call-toggle primary"
+              type="button"
+              aria-pressed="false"
+              aria-label="Start call"
+            >
+              📞
+            </button>
+
+            <button
+              id="mic-btn"
+              class="btn circle"
+              type="button"
+              aria-pressed="false"
+              aria-label="Toggle microphone"
+            >
+              🎙
+            </button>
+
+            <button
+              id="speaker-btn"
+              class="btn circle"
+              type="button"
+              aria-pressed="true"
+              aria-label="Toggle speaker"
+            >
+              🔊
+            </button>
+          </div>
+
+          <!-- Mode toggle: Call view / Chat view -->
+          <div
+            class="row"
+            style="margin-top:0.75rem;justify-content:center;gap:0.5rem;"
+          >
+            <button
+              id="mode-btn"
+              class="btn pill small"
+              type="button"
+              aria-pressed="false"
+              title="Switch between Call and Chat view"
+            >
+              Switch to Chat
+            </button>
+          </div>
+
+          <!-- Chat panel will be injected by call.js after #transcript -->
+          <!-- <div id="chat-panel">…</div> is created dynamically -->
+        </div>
+      </section>
     </section>
 
-    <section>
-      <div class="call-card">
-        <!-- Avatar + animated ring -->
-        <div class="call-avatar-wrap" id="avatar-container">
-          <canvas id="voiceRing"></canvas>
-          <!-- Replace src with your actual avatar asset -->
-          <img
-            src="avatar-blake.png"
-            alt="AI Blake"
-            class="call-avatar-img"
-          />
-        </div>
-
-        <!-- Status + timer -->
-        <div class="call-status">
-          <span id="status-text">Tap the blue call button to begin.</span>
-        </div>
-        <div class="call-timer" id="call-timer">00:00</div>
-
-        <!-- Transcript area -->
-        <div id="transcript" class="call-transcript">
-          <div id="transcript-list" class="transcript-list"></div>
-          <div id="transcript-interim" class="transcript-interim"></div>
-        </div>
-
-        <!-- Call controls -->
-        <div class="call-controls">
-          <button
-            id="call-btn"
-            class="btn circle call-toggle primary"
-            type="button"
-            aria-pressed="false"
-            aria-label="Start call"
-          >
-            📞
-          </button>
-
-          <button
-            id="mic-btn"
-            class="btn circle"
-            type="button"
-            aria-pressed="false"
-            aria-label="Toggle microphone"
-          >
-            🎙
-          </button>
-
-          <button
-            id="speaker-btn"
-            class="btn circle"
-            type="button"
-            aria-pressed="true"
-            aria-label="Toggle speaker"
-          >
-            🔊
-          </button>
-        </div>
-
-        <!-- Mode toggle: Call view / Chat view on same page -->
-        <div
-          class="row"
-          style="margin-top:0.75rem;justify-content:center;gap:0.5rem;"
-        >
-          <button
-            id="mode-btn"
-            class="btn pill small"
-            type="button"
-            aria-pressed="false"
-            title="Switch between Call and Chat view"
-          >
-            Switch to Chat
-          </button>
-        </div>
-
-        <!-- Chat panel will be injected by call.js after #transcript -->
-        <!-- <div id="chat-panel">…</div> is created dynamically -->
-      </div>
-    </section>
+    <!-- Right: Live transcript panel (iframe) -->
+    <aside class="call-side-transcript" aria-label="Live transcription">
+      <iframe
+        id="callTranscriptFrame"
+        src="transcript.html?embed=1"
+        title="Live call transcription"
+        loading="lazy"
+      ></iframe>
+    </aside>
   </main>
 
   <footer class="sow-footer tiny">
@@ -129,7 +144,7 @@
 
   <!-- Scripts -->
   <script type="module">
-    // simple back button to home, starting fresh (no specific thread)
+    // Back button → home with a fresh conversation
     const backBtn = document.getElementById("btn-back-home");
     if (backBtn) {
       backBtn.addEventListener("click", (e) => {

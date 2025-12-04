@@ -7,15 +7,30 @@
     <link rel="stylesheet" href="./style.css" />
   </head>
   <body class="ts-live">
-    <main id="app" class="transcript-wrap live">
-      <header class="ts-header live">
-        <div class="title-left">
-          <span class="dot"></span>
-          <span class="title">Live Transcription</span>
+    <main id="app" class="transcript-wrap">
+      <header class="ts-header">
+        <div class="title-wrap">
+          <div class="title-left">
+            <span class="dot"></span>
+            <h1>Live Transcription</h1>
+          </div>
+          <span id="liveBadge" class="live">OFFLINE</span>
         </div>
-        <button id="closeBtn" class="ghost" aria-label="Close">
-          ✕
-        </button>
+
+        <div class="actions">
+          <button id="copyBtn" class="ghost" type="button">Copy all</button>
+          <button id="downloadBtn" class="ghost" type="button">
+            Download JSON
+          </button>
+          <button
+            id="closeBtn"
+            class="ghost icon-only"
+            type="button"
+            aria-label="Close transcript"
+          >
+            ×
+          </button>
+        </div>
       </header>
 
       <section
@@ -25,7 +40,26 @@
         aria-atomic="false"
       ></section>
 
-      <button id="autoScrollBtn" class="auto-scroll">Auto scroll</button>
+      <button id="autoScrollBtn" class="auto-scroll" type="button">
+        Auto scroll
+      </button>
+
+      <footer class="ts-footer">
+        <div class="row">
+          <span>Call ID</span>
+          <input
+            id="callIdInput"
+            class="mono"
+            type="text"
+            placeholder="Paste or type a call_id"
+          />
+          <button id="watchBtn" class="primary" type="button">Watch</button>
+        </div>
+        <span class="hint">
+          Current call:
+          <code id="callIdLabel">–</code>
+        </span>
+      </footer>
     </main>
 
     <script type="module" src="./app/transcript.js"></script>

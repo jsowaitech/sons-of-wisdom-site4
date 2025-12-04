@@ -645,6 +645,12 @@ body.chat-app .content {
   font-style: italic;
 }
 
+/* Hide the obsolete mini transcript bar on the call card;
+   transcripts now live in the right-hand panel */
+.page-call .call-transcript {
+  display: none;
+}
+
 /* Controls */
 .call-controls {
   margin-top: 0.95rem;
@@ -1063,6 +1069,65 @@ body.sow-shell main.content h2.tiny {
   color: var(--text-gold);
 }
 
+/* Header title-left + dot for "Live Transcription" */
+.ts-header .title-left {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.ts-header .title-left .dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+  background: radial-gradient(circle at center, #22c55e, #15803d);
+  box-shadow: 0 0 12px rgba(34, 197, 94, 0.9);
+}
+
+/* Floating auto-scroll toggle button on transcript page */
+.auto-scroll {
+  position: fixed;
+  right: 1.4rem;
+  bottom: 1.5rem;
+  padding: 0.45rem 0.9rem;
+  border-radius: 999px;
+  border: 1px solid rgba(37, 99, 235, 0.8);
+  background: radial-gradient(
+    circle at top left,
+    rgba(59, 130, 246, 0.9),
+    rgba(37, 99, 235, 0.9)
+  );
+  color: white;
+  font-size: 0.78rem;
+  cursor: pointer;
+  box-shadow: 0 12px 25px rgba(15, 23, 42, 0.9);
+  z-index: 50;
+}
+
+.auto-scroll.on {
+  opacity: 1;
+}
+
+.auto-scroll:not(.on) {
+  opacity: 0.6;
+}
+
+/* When transcript.html is embedded in the call page */
+body.ts-live.embed .transcript-wrap {
+  max-width: none;
+  margin: 0; /* remove outer margin so it fits the iframe */
+  padding: 0.75rem 0.9rem 0.9rem;
+  border-radius: 18px;
+  box-shadow: none;
+  border: none;
+}
+
+body.ts-live.embed .auto-scroll {
+  position: absolute;
+  right: 0.9rem;
+  bottom: 0.9rem;
+}
+
 /* =========================================================
    CALL + TRANSCRIPT SPLIT LAYOUT
    ========================================================= */
@@ -1075,17 +1140,21 @@ body.sow-shell main.content h2.tiny {
 }
 
 /* Right-hand transcript panel (iframe) */
+/* Right-hand transcript panel (iframe) */
 .call-side-transcript {
   background: rgba(2, 6, 23, 0.96);
   border-radius: 22px;
   border: 1px solid var(--border-subtle);
   padding: 0.9rem;
   box-shadow: var(--shadow-soft);
-  min-height: 260px;
-  max-height: calc(100vh - 260px);
+
+  /* 🔵 Make the panel taller so the whole transcript card fits */
+  height: 380px;          /* tweak this up/down if you want */
+
   display: flex;
   flex-direction: column;
 }
+
 
 .call-side-transcript iframe {
   width: 100%;
@@ -1100,8 +1169,10 @@ body.sow-shell main.content h2.tiny {
     display: block;
   }
 
-  .call-side-transcript {
+    .call-side-transcript {
     margin-top: 1rem;
-    max-height: 340px;
+    height: auto;
+    min-height: 320px;
   }
+
 }

@@ -4,7 +4,8 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Sign in — Son of Wisdom</title>
-  <link rel="stylesheet" href="/style.css" />
+  <!-- 🔁 changed from /style.css to style.css -->
+  <link rel="stylesheet" href="style.css" />
 </head>
 <body class="sow-shell">
 
@@ -12,57 +13,156 @@
   <header class="sow-hero" aria-label="Son of Wisdom">
     <div class="sow-hero-logo-ring">
       <div class="sow-hero-logo-inner">
-        <img src="/Sonofwisdom.png" alt="Son of Wisdom logo" class="sow-hero-logo-img" />
+        <!-- 🔁 changed from /Sonofwisdom.png to Sonofwisdom.png -->
+        <img src="Sonofwisdom.png" alt="Son of Wisdom logo" class="sow-hero-logo-img" />
       </div>
     </div>
 
     <h1 class="sow-hero-title">Son of Wisdom</h1>
-    <p class="sow-hero-tagline">An AI Coach for the Warrior Heart.</p>
-
-    <h2 class="sow-hero-welcome">Welcome, Son of Wisdom</h2>
+    <p class="sow-hero-tagline">Your AI coach for Christian men.</p>
     <p class="sow-hero-subcopy">
-      Step into clarity, courage, and spiritual leadership.
+      Sign in or create an account to continue your journey with Blake.
     </p>
   </header>
 
-  <!-- Auth card -->
-  <main id="auth-app" class="auth-main" aria-live="polite">
-    <section class="auth-card auth-card--primary">
-      <h3 class="auth-card-title">Welcome back</h3>
+  <main class="auth-main">
+    <section class="auth-card" aria-label="Authentication">
+      <h2 class="auth-card-title" id="auth-card-title">Sign in</h2>
+      <p class="tiny muted" id="auth-card-sub" style="margin-bottom:0.75rem;">
+        Sign in to continue where you left off.
+      </p>
 
-      <div class="auth-field">
-        <label for="email">Email</label>
-        <input
-          id="email"
-          class="input auth-input"
-          type="email"
-          placeholder="you@domain.com"
-          autocomplete="email"
-          required
-        />
+      <!-- SIGN IN VIEW -->
+      <div id="view-signin">
+        <div class="auth-field">
+          <label for="signin-email">Email</label>
+          <input
+            id="signin-email"
+            type="email"
+            class="input auth-input"
+            autocomplete="email"
+            required
+          />
+        </div>
+
+        <div class="auth-field">
+          <label for="signin-password">Password</label>
+          <div class="row">
+            <input
+              id="signin-password"
+              type="password"
+              class="input auth-input"
+              autocomplete="current-password"
+              required
+            />
+            <button
+              type="button"
+              id="toggle-password"
+              class="btn small ghost"
+              aria-label="Toggle password visibility"
+            >
+              👁️
+            </button>
+          </div>
+        </div>
+
+        <div class="row auth-links-row tiny">
+          <a id="link-signup" href="?mode=signup" class="auth-link">
+            Create an account
+          </a>
+          <a id="link-forgot" href="#" class="auth-link">
+            Forgot password?
+          </a>
+        </div>
+
+        <button id="btn-signin" class="btn primary auth-submit" type="button">
+          Sign in
+        </button>
       </div>
 
-      <div class="auth-field">
-        <label for="password">Password</label>
-        <input
-          id="password"
-          class="input auth-input"
-          type="password"
-          placeholder="••••••••"
-          autocomplete="current-password"
-          required
-        />
+      <!-- SIGN UP: EMAIL STEP VIEW -->
+      <div id="view-signup-email" style="display:none;">
+        <div class="auth-field">
+          <label for="signup-email">Email</label>
+          <input
+            id="signup-email"
+            type="email"
+            class="input auth-input"
+            autocomplete="email"
+            required
+          />
+        </div>
+
+        <button id="btn-signup-email" class="btn primary auth-submit" type="button">
+          Send confirmation link
+        </button>
+
+        <p class="tiny muted" style="margin-top:0.5rem;">
+          We'll send an email with a secure link. Open it, and you'll be taken
+          to a page where you can choose a password.
+        </p>
+
+        <div class="row auth-links-row tiny" style="margin-top:0.5rem;">
+          <a href="#" id="link-back-signin" class="auth-link">
+            Back to sign in
+          </a>
+        </div>
       </div>
 
-      <div class="row tiny auth-links-row">
-        <a id="link-signup" href="#" class="auth-link">Create an account</a>
-        <a id="link-forgot" href="#" class="auth-link">Forgot password?</a>
+      <!-- SET PASSWORD VIEW (from email link) -->
+      <div id="view-set-password" style="display:none;">
+        <p
+          class="tiny muted"
+          id="setpw-email-line"
+          style="margin-bottom:0.75rem; display:none;"
+        >
+          For <span id="user-email" style="font-weight:600;"></span>
+        </p>
+
+        <form id="set-password-form">
+          <div class="auth-field">
+            <label for="sp-password">New password</label>
+            <input
+              id="sp-password"
+              type="password"
+              class="input auth-input"
+              autocomplete="new-password"
+              required
+            />
+          </div>
+
+          <div class="auth-field">
+            <label for="sp-password-confirm">Confirm password</label>
+            <input
+              id="sp-password-confirm"
+              type="password"
+              class="input auth-input"
+              autocomplete="new-password"
+              required
+            />
+          </div>
+
+          <button
+            id="btn-set-password"
+            class="btn primary auth-submit"
+            type="submit"
+          >
+            Save password
+          </button>
+        </form>
+
+        <p
+          id="setpw-signin-link"
+          class="tiny muted center"
+          style="margin-top:0.6rem; display:none;"
+        >
+          You can now
+          <a class="auth-link" href="/auth.html">sign in</a>
+          with your new password.
+        </p>
       </div>
 
-      <button id="btn-signin" class="btn primary auth-submit" type="button">
-        Sign in
-      </button>
-
+      <!-- Shared status line -->
       <div
         id="status"
         class="status-line tiny auth-status"
