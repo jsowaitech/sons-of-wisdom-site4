@@ -26,12 +26,7 @@
     </div>
 
     <!-- This gets wired by call.js once we know conversationId -->
-    <a
-      id="thread-link"
-      class="btn small"
-      href="#"
-      style="display:none;"
-    >
+    <a id="thread-link" class="btn small" href="#" style="display:none;">
       Return to conversation
     </a>
   </header>
@@ -52,12 +47,7 @@
           <!-- Avatar + animated ring -->
           <div class="call-avatar-wrap" id="avatar-container">
             <canvas id="voiceRing"></canvas>
-            <!-- Replace src with your actual avatar asset -->
-            <img
-              src="avatar-blake.jpg"
-              alt="AI Blake"
-              class="call-avatar-img"
-            />
+            <img src="avatar-blake.jpg" alt="AI Blake" class="call-avatar-img" />
           </div>
 
           <!-- Status + timer -->
@@ -66,8 +56,8 @@
           </div>
           <div class="call-timer" id="call-timer">00:00</div>
 
-          <!-- Transcript container (kept for JS hooks, hidden via CSS) -->
-          <div id="transcript" class="call-transcript">
+          <!-- Hidden in-call transcript (still needed for JS hooks) -->
+          <div id="transcript" class="call-transcript" style="display:none;">
             <div id="transcript-list" class="transcript-list"></div>
             <div id="transcript-interim" class="transcript-interim"></div>
           </div>
@@ -105,7 +95,7 @@
             </button>
           </div>
 
-          <!-- Mode toggle: Call view / Chat view -->
+          <!-- Mode toggle -->
           <div
             class="row"
             style="margin-top:0.75rem;justify-content:center;gap:0.5rem;"
@@ -121,13 +111,12 @@
             </button>
           </div>
 
-          <!-- Chat panel will be injected by call.js after #transcript -->
-          <!-- <div id="chat-panel">…</div> is created dynamically -->
+          <!-- Chat panel is injected dynamically by call.js -->
         </div>
       </section>
     </section>
 
-    <!-- Right: Live transcript panel (iframe) -->
+    <!-- Right-hand live transcript panel -->
     <aside class="call-side-transcript" aria-label="Live transcription">
       <iframe
         id="callTranscriptFrame"
@@ -142,9 +131,8 @@
     Built for sons, warriors, and kings learning to govern their homes.
   </footer>
 
-  <!-- Scripts -->
+  <!-- Back to home -->
   <script type="module">
-    // Back button → home with a fresh conversation
     const backBtn = document.getElementById("btn-back-home");
     if (backBtn) {
       backBtn.addEventListener("click", (e) => {
@@ -157,6 +145,7 @@
     }
   </script>
 
+  <!-- App logic -->
   <script type="module" src="app/call.js"></script>
 </body>
 </html>

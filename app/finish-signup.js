@@ -1,13 +1,13 @@
 // app/finish-signup.js
-// Handles "finish sign up" + "reset password" after the user clicks their email link.
-// - Confirms the Supabase session from the link
-// - Lets the user choose a password
-// - Signs them out and sends them back to auth.html to sign in
+// - Opened via link from Supabase (signup or recovery)
+// - Confirms link, lets user set password
+// - Signs out and sends back to auth.html for normal sign in
 
 import { supabase } from "./supabase.js";
 
-// Same origin logic as auth.js
-const DEV_FALLBACK_ORIGIN = "https://wonderful-swan-01729a.netlify.app";
+const $ = (sel) => document.querySelector(sel);
+
+const DEV_FALLBACK_ORIGIN = "http://127.0.0.1:5500";
 
 function getAuthOrigin() {
   const origin = window.location.origin;
@@ -16,22 +16,20 @@ function getAuthOrigin() {
 }
 
 // DOM
-const statusEl = document.getElementById("status");
-const titleEl = document.getElementById("auth-card-title");
-const subEl = document.getElementById("auth-card-sub");
-
-// Reuse the same IDs that the old set-password view used
-const setpwEmailLine = document.getElementById("setpw-email-line");
-const setpwEmailSpan = document.getElementById("user-email");
-const setpwForm = document.getElementById("set-password-form");
-const setpwPassEl = document.getElementById("sp-password");
-const setpwPassConfEl = document.getElementById("sp-password-confirm");
-const btnSetPassword = document.getElementById("btn-set-password");
-const setpwSigninLink = document.getElementById("setpw-signin-link");
+const titleEl = $("#finish-title");
+const subEl = $("#finish-sub");
+const statusEl = $("#status");
+const setpwEmailLine = $("#setpw-email-line");
+const setpwEmailSpan = $("#user-email");
+const setpwForm = $("#set-password-form");
+const setpwPassEl = $("#sp-password");
+const setpwPassConfEl = $("#sp-password-confirm");
+const btnSetPassword = $("#btn-set-password");
+const setpwSigninLink = $("#setpw-signin-link");
 
 const params = new URLSearchParams(window.location.search);
+const from = params.get("from") || "signup";
 
-// ---------- helpers ----------
 function setStatus(message, kind = "info") {
   if (!statusEl) return;
   statusEl.textContent = message || "";
@@ -40,22 +38,20 @@ function setStatus(message, kind = "info") {
 }
 
 function setCopyFromContext() {
-  const from = params.get("from") || "signup";
   if (!titleEl || !subEl) return;
 
   if (from === "recovery") {
     titleEl.textContent = "Reset your password";
     subEl.textContent =
-      "You opened a password reset link. Choose a new password for your account.";
+      "Your reset link is confirmed. Choose a new password for your account.";
   } else {
     titleEl.textContent = "Create your password";
     subEl.textContent =
-      "Your email is confirmed. Now choose a password for your Son of Wisdom account.";
+      "Your email is confirmed. Choose a password for your Son of Wisdom account.";
   }
 }
 
-// ---------- boot: validate link + show email ----------
-async function boot() {
+async function init() {
   setCopyFromContext();
   setStatus("Checking your link…", "info");
 
@@ -82,7 +78,6 @@ async function boot() {
   setStatus("", "info");
 }
 
-// ---------- submit: save password ----------
 setpwForm?.addEventListener("submit", async (e) => {
   e.preventDefault();
   const pwd = (setpwPassEl?.value || "").trim();
@@ -126,21 +121,16 @@ setpwForm?.addEventListener("submit", async (e) => {
       return;
     }
 
-    setStatus("Password saved. Redirecting you to sign in…", "success");
+    setStatus("Password saved. Redirecting you to sign in…", "info");
 
-    // End the special email-link session and send them to normal login
-    try {
-      await supabase.auth.signOut();
-    } catch (err) {
-      console.warn("[finish-signup] signOut error", err);
-    }
+    await supabase.auth.signOut();
 
     const origin = getAuthOrigin();
-    const url = new URL("auth.html", origin);
-    url.searchParams.set("mode", "signin");
-    if (email) url.searchParams.set("email", email);
-    url.searchParams.set("password_set", "1");
-    window.location.href = url.toString();
+    const dest = new URL("auth.html", origin);
+    dest.searchParams.set("mode", "signin");
+    if (email) dest.searchParams.set("email", email);
+    dest.searchParams.set("password_set", "1");
+    window.location.href = dest.toString();
   } catch (err) {
     console.error("[finish-signup] unexpected set-password error", err);
     setStatus("Unexpected error updating password.", "error");
@@ -148,9 +138,9 @@ setpwForm?.addEventListener("submit", async (e) => {
   }
 });
 
-// ---------- start ----------
-boot().catch((err) => {
-  console.error("[finish-signup] boot error", err);
+// boot
+init().catch((err) => {
+  console.error("[finish-signup] init error", err);
   setStatus("Something went wrong loading this page.", "error");
 });
 

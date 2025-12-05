@@ -1,65 +1,108 @@
-<!-- finish-signup.html -->
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
   <head>
-    <meta charset="UTF-8" />
-    <title>Set your password • Son of Wisdom</title>
+    <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Finish sign up — Son of Wisdom</title>
     <link rel="stylesheet" href="style.css" />
   </head>
-  <body class="auth-page">
-    <main class="auth-shell">
-      <header class="auth-header">
-        <img
-          src="assets/logo-sow.svg"
-          alt="Son of Wisdom logo"
-          class="auth-logo"
-          onerror="this.style.display='none'"
-        />
-        <h1>Set your password</h1>
-        <p class="auth-subtitle">
-          You’ve confirmed your email. Choose a password to finish creating or
-          restoring your account.
-        </p>
-      </header>
-
-      <p id="pw-status" class="auth-status"></p>
-
-      <form id="set-password-form" class="auth-form hidden">
-        <label class="auth-field">
-          <span>New password</span>
-          <input
-            id="new-password"
-            type="password"
-            minlength="8"
-            autocomplete="new-password"
-            required
+  <body class="sow-shell">
+    <!-- Hero / brand -->
+    <header class="sow-hero" aria-label="Son of Wisdom">
+      <div class="sow-hero-logo-ring">
+        <div class="sow-hero-logo-inner">
+          <img
+            src="Sonofwisdom.png"
+            alt="Son of Wisdom logo"
+            class="sow-hero-logo-img"
           />
-        </label>
+        </div>
+      </div>
 
-        <label class="auth-field">
-          <span>Confirm password</span>
-          <input
-            id="confirm-password"
-            type="password"
-            minlength="8"
-            autocomplete="new-password"
-            required
-          />
-        </label>
-
-        <button type="submit" class="auth-btn primary">
-          Save password
-        </button>
-      </form>
-
-      <p class="auth-footer">
-        Already have a password?
-        <a href="auth.html">Back to sign in</a>
+      <h1 class="sow-hero-title">Son of Wisdom</h1>
+      <p class="sow-hero-tagline">Your AI coach for Christian men.</p>
+      <p class="sow-hero-subcopy">
+        Finish setting up your account so you can sign in securely.
       </p>
+    </header>
+
+    <main class="auth-main">
+      <section class="auth-card" aria-label="Finish signup">
+        <h2 class="auth-card-title" id="finish-title">
+          Finish creating your account
+        </h2>
+        <p
+          class="tiny muted"
+          id="finish-sub"
+          style="margin-bottom:0.75rem;"
+        >
+          Checking your link…
+        </p>
+
+        <p
+          class="tiny muted"
+          id="setpw-email-line"
+          style="margin-bottom:0.75rem; display:none;"
+        >
+          For <span id="user-email" style="font-weight:600;"></span>
+        </p>
+
+        <form id="set-password-form" style="opacity:1;">
+          <div class="auth-field">
+            <label for="sp-password">New password</label>
+            <input
+              id="sp-password"
+              type="password"
+              class="input auth-input"
+              autocomplete="new-password"
+              required
+            />
+          </div>
+
+          <div class="auth-field">
+            <label for="sp-password-confirm">Confirm password</label>
+            <input
+              id="sp-password-confirm"
+              type="password"
+              class="input auth-input"
+              autocomplete="new-password"
+              required
+            />
+          </div>
+
+          <button
+            id="btn-set-password"
+            class="btn primary auth-submit"
+            type="submit"
+          >
+            Save password
+          </button>
+        </form>
+
+        <p
+          id="setpw-signin-link"
+          class="tiny muted center"
+          style="margin-top:0.6rem; display:none;"
+        >
+          You can now
+          <a class="auth-link" href="auth.html">sign in</a>
+          with your new password.
+        </p>
+
+        <div
+          id="status"
+          class="status-line tiny auth-status"
+          role="status"
+          aria-live="polite"
+          style="margin-top:0.6rem; display:none;"
+        ></div>
+      </section>
     </main>
 
-    <script type="module" src="./supabase.js"></script>
-    <script type="module" src="./finish-signup.js"></script>
+    <footer class="sow-footer tiny">
+      powered by <span class="brand-mini">Son of Wisdom</span>
+    </footer>
+
+    <script type="module" src="app/finish-signup.js"></script>
   </body>
 </html>
