@@ -1153,7 +1153,7 @@ body.ts-live.embed .auto-scroll {
   padding: 0.9rem;
   box-shadow: var(--shadow-soft);
 
-  /* 🔵 Make the panel taller so the whole transcript card fits */
+  /* default desktop height */
   height: 380px;
 
   display: flex;
@@ -1167,7 +1167,7 @@ body.ts-live.embed .auto-scroll {
   border-radius: 16px;
 }
 
-/* Stack vertically on smaller screens */
+/* Stack vertically on smaller screens & make transcript readable on phones */
 @media (max-width: 900px) {
   .page-call .content.call-layout {
     display: block;
@@ -1176,6 +1176,24 @@ body.ts-live.embed .auto-scroll {
   .call-side-transcript {
     margin-top: 1rem;
     height: auto;
-    min-height: 320px;
+    min-height: 60vh;      /* 🔵 grow with viewport on mobile */
+    max-height: none;
+    padding: 0.85rem;
+  }
+
+  .call-side-transcript iframe {
+    height: 100%;
+    min-height: 52vh;      /* 🔵 ensure inner transcript card has room */
+  }
+}
+
+@media (max-width: 480px) {
+  .call-side-transcript {
+    min-height: 65vh;      /* a bit more space on very small phones */
+    padding: 0.8rem;
+  }
+
+  .call-side-transcript iframe {
+    min-height: 56vh;
   }
 }

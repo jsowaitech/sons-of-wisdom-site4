@@ -154,6 +154,13 @@ const HAS_NATIVE_ASR =
   "SpeechRecognition" in window || "webkitSpeechRecognition" in window;
 let speechRecognizer = null;
 
+if (!HAS_NATIVE_ASR) {
+  // Helpful warning on platforms without Web Speech (most mobile browsers)
+  console.warn(
+    "[SOW] Native speech recognition not available; call-mode live transcript will not work on this device."
+  );
+}
+
 /* Audio routing */
 let playbackAC = null;
 const managedAudios = new Set();
@@ -169,9 +176,9 @@ let greetingAudioUrl = null;
 /* ---------- NEW: Idle detection (no response) ---------- */
 const NO_RESPONSE = {
   // after AI finishes speaking, wait this long for user to speak
-  FIRST_NUDGE_MS: 20_000,
+  FIRST_NUDGE_MS: 20_000, // 20 seconds
   // after the nudge is spoken, wait this long for user to speak
-  END_CALL_MS: 20_000,
+  END_CALL_MS: 20_000, // 20 seconds
   // minimum time after AI speech before any idle logic can run
   ARM_DELAY_MS: 600,
 };
@@ -1227,6 +1234,16 @@ async function startCall() {
     greetingPayload = null;
     prepareGreetingForNextCall();
 
+    // If this browser doesn't support native speech recognition,
+    // we can't safely run the live call loop. Fail gracefully.
+    if (!HAS_NATIVE_ASR) {
+      statusText.textContent =
+        "This browser doesn’t fully support live call mode. Please use desktop Chrome or type in chat.";
+      endCall();
+      return;
+    }
+
+    statusText.textContent = "Listening…";
     await startRecordingLoop();
   } catch (e) {
     warn("startCall error", e);
@@ -1468,6 +1485,9 @@ async function captureOneTurn() {
 
     recordChunks = [];
     isRecording = true;
+
+    // Make it very obvious it's their turn now
+    statusText.textContent = "Listening…";
 
     mediaRecorder.ondataavailable = (e) => {
       if (e.data?.size > 0) {

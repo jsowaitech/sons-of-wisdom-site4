@@ -12,7 +12,8 @@
 // ✅ Supports system_say: exact assistant line to speak
 // ✅ Generates unique no-response lines (anti-repeat window)
 // ✅ Returns audio for system events too
-// ✅ Skips logging system events to call_sessions by default
+// ✅ Skips logging system events to call_sessions by default (unless LOG_SYSTEM_EVENTS)
+// ✅ NEW: logs system events into conversation_messages so chat transcript stays in sync
 
 const { Pinecone } = require("@pinecone-database/pinecone");
 
@@ -246,9 +247,7 @@ Default pattern:
 * First time he brings up a new specific problem → DIAGNOSTIC mode.
 * After you understand the situation → MICRO-GUIDANCE mode.
 
-(… prompt continues with all the rules for diagnostic/micro-guidance, variation, Scripture usage, safety, Codex overlay, etc. …)
-
-All of this must be delivered in TTS-safe plain text, without markdown symbols, lists, headings, or escape sequences in your responses.
+(… prompt continues …)
 `.trim();
 
 // ---------- Pinecone setup ----------
@@ -516,9 +515,13 @@ async function maybeUpdateConversationTitle(
 
   await supaFetch("conversations", {
     method: "PATCH",
-    headers: { "Content-Type": "application/json", Prefer: "return=minimal" },
+    headers: { "Content-Type": "application/json", Prefer: "return-minimal" },
     query: { id: `eq.${conversationId}` },
-    body: JSON.stringify({ title: newTitle, updated_at: nowIso, last_updated_at: nowIso }),
+    body: JSON.stringify({
+      title: newTitle,
+      updated_at: nowIso,
+      last_updated_at: nowIso,
+    }),
   });
 }
 
@@ -571,7 +574,7 @@ async function updateConversationSummary(
     const nowIso = new Date().toISOString();
     await supaFetch("conversations", {
       method: "PATCH",
-      headers: { "Content-Type": "application/json", Prefer: "return=minimal" },
+      headers: { "Content-Type": "application/json", Prefer: "return-minimal" },
       query: { id: `eq.${conversationId}` },
       body: JSON.stringify({ summary: newSummary, last_updated_at: nowIso }),
     });
@@ -776,6 +779,8 @@ exports.handler = async (event) => {
       }
     }
 
+    const nowIso = new Date().toISOString();
+
     // ---------- SYSTEM MODE RESPONSE ----------
     if (isSystemMode) {
       const key = getNoRespKey(callId, deviceId);
@@ -803,7 +808,7 @@ exports.handler = async (event) => {
         console.error("[call-coach] TTS error (system mode):", e);
       }
 
-      // Optional: log system events if enabled
+      // Optional: log system events to call_sessions
       if (LOG_SYSTEM_EVENTS && SUPABASE_REST && SUPABASE_SERVICE_ROLE_KEY) {
         const userId = body.user_id || "";
         const userUuid = pickUuidForHistory(userId);
@@ -817,12 +822,57 @@ exports.handler = async (event) => {
               ? `[system_event] ${systemEvent}`
               : "[system_say]",
             ai_text: reply,
-            created_at: new Date().toISOString(),
+            created_at: nowIso,
           };
           await tryInsertCallSession(row);
         } catch (e) {
           console.error(
             "[call-coach] call_sessions insert error (system mode):",
+            e
+          );
+        }
+      }
+
+      // ✅ NEW: also log system events into conversation_messages so chat transcript sees them
+      if (
+        conversation &&
+        conversationId &&
+        SUPABASE_REST &&
+        SUPABASE_SERVICE_ROLE_KEY
+      ) {
+        try {
+          const row = {
+            conversation_id: conversationId,
+            user_id: conversation.user_id,
+            role: "assistant",
+            content: reply,
+            created_at: nowIso,
+          };
+
+          await supaFetch("conversation_messages", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              Prefer: "return-minimal",
+            },
+            body: JSON.stringify([row]),
+          });
+
+          await supaFetch("conversations", {
+            method: "PATCH",
+            headers: {
+              "Content-Type": "application/json",
+              Prefer: "return-minimal",
+            },
+            query: { id: `eq.${conversationId}` },
+            body: JSON.stringify({
+              updated_at: nowIso,
+              last_updated_at: nowIso,
+            }),
+          });
+        } catch (e) {
+          console.error(
+            "[call-coach] conversation system-message logging error:",
             e
           );
         }
@@ -953,7 +1003,7 @@ Use this context to stay consistent with what has already been shared. Do not re
           source,
           input_transcript: rawUtterance || userMessageForAI,
           ai_text: reply,
-          created_at: new Date().toISOString(),
+          created_at: nowIso,
         };
         await tryInsertCallSession(row);
       } catch (e) {
