@@ -1,12 +1,25 @@
 // app/call.js
 // Son of Wisdom — Call mode
-// Idle-detection + system_event calls + INLINE transcript panel (no iframe)
-// Deepgram fallback runs ONLY on mobile browsers (streaming WS)
+// Voice call + inline transcript + mobile Deepgram streaming + on-screen Debug HUD
+//
+// NOTES:
+// - Desktop: uses Web Speech API if available (live captions).
+// - Mobile (Android Chrome / iOS Safari): uses Deepgram WS streaming (live captions).
+// - The spoken user audio is still recorded via MediaRecorder and sent to call-coach.
+// - Debug HUD appears on the UI (no console needed) and shows DG status/errors.
+//
+// Requires:
+// - Netlify function: /.netlify/functions/deepgram-token  (returns {access_token})
+// - Netlify function: /.netlify/functions/call-coach
+// - Netlify function: /.netlify/functions/call-greeting
 
 import { supabase } from "./supabase.js";
 
 /* ---------- CONFIG ---------- */
 const DEBUG = true;
+
+// ✅ UI Debug HUD (no console needed)
+const DEBUG_HUD = true;
 
 /* Optional: Hume realtime SDK (safe stub if not loaded) */
 const HumeRealtime = window.HumeRealtime ?? {
@@ -18,10 +31,15 @@ const HumeRealtime = window.HumeRealtime ?? {
 HumeRealtime.init?.({ enable: false });
 
 /* ---------- Supabase (OPTIONAL) ---------- */
+/**
+ * In local dev you can inject:
+ *   window.SUPABASE_SERVICE_ROLE_KEY = "....";
+ * For production we recommend proxying through a secure backend instead of
+ * exposing a service role key to the browser.
+ */
 const SUPABASE_URL = "https://plrobtlpedniyvkpwdmp.supabase.co";
 const SUPABASE_SERVICE_ROLE_KEY = window.SUPABASE_SERVICE_ROLE_KEY || "";
-const HAS_SUPABASE =
-  Boolean(SUPABASE_URL) && Boolean(SUPABASE_SERVICE_ROLE_KEY);
+const HAS_SUPABASE = Boolean(SUPABASE_URL) && Boolean(SUPABASE_SERVICE_ROLE_KEY);
 
 // Storage
 const SUPABASE_BUCKET = "audiossow";
@@ -38,6 +56,7 @@ const SUMMARY_TABLE = "history_summaries";
 const SUMMARY_MAX_CHARS = 380;
 
 /* ---------- n8n webhooks / Netlify endpoints ---------- */
+/** Text chat logic still uses n8n for now. */
 const N8N_WEBHOOK_URL =
   "https://jsonofwisdom.app.n8n.cloud/webhook/4877ebea-544b-42b4-96d6-df41c58d48b0";
 
@@ -64,7 +83,7 @@ const ENABLE_STREAMED_PLAYBACK = !IS_MOBILE;
 /**
  * ✅ Deepgram fallback runs ONLY on mobile.
  * - Desktop: Web Speech API if available
- * - Mobile: Deepgram streaming websocket captions
+ * - Mobile: Deepgram WS streaming
  */
 const USE_DEEPGRAM_ON_MOBILE = IS_MOBILE;
 
@@ -73,7 +92,7 @@ const USER_ID_KEY = "sow_user_id";
 const DEVICE_ID_KEY = "sow_device_id";
 const SENTINEL_UUID = "00000000-0000-0000-0000-000000000000";
 
-/** current call session id */
+/** the current call session id (used for transcript mode) */
 let currentCallId = null;
 
 const isUuid = (v) =>
@@ -84,7 +103,7 @@ const isUuid = (v) =>
 /* ---------- Conversation thread (from ?c=...) ---------- */
 const urlParams = new URLSearchParams(window.location.search);
 const conversationId = urlParams.get("c") || null;
-let conversationTitleLocked = false;
+let conversationTitleLocked = false; // once we set title successfully, we stop trying
 
 function getOrCreateDeviceId() {
   let id = localStorage.getItem(DEVICE_ID_KEY);
@@ -119,14 +138,13 @@ const micBtn = document.getElementById("mic-btn");
 const speakerBtn = document.getElementById("speaker-btn");
 const modeBtn = document.getElementById("mode-btn");
 const threadLink =
-  document.getElementById("thread-link") ||
-  document.getElementById("btn-thread");
+  document.getElementById("thread-link") || document.getElementById("btn-thread");
 
 // Legacy hidden transcript container (kept for compatibility)
 const legacyTranscriptList = document.getElementById("transcript-list");
 const legacyTranscriptInterim = document.getElementById("transcript-interim");
 
-// ✅ Inline transcript panel (right-hand side)
+// ✅ Inline transcript panel
 const transcriptListEl =
   document.getElementById("transcriptList") || legacyTranscriptList;
 const transcriptInterimEl =
@@ -154,7 +172,7 @@ let globalStream = null;
 let mediaRecorder = null;
 let recordChunks = [];
 
-/* Native ASR */
+/* Native ASR for user live captions */
 const HAS_NATIVE_ASR =
   "SpeechRecognition" in window || "webkitSpeechRecognition" in window;
 let speechRecognizer = null;
@@ -166,12 +184,12 @@ let preferredOutputDeviceId = null;
 let micMuted = false;
 let speakerMuted = false;
 
-/* Greeting prefetch state */
+/* Greeting prefetch */
 let greetingReadyPromise = null;
-let greetingPayload = null;
+let greetingPayload = null; // { text, audio_base64, mime }
 let greetingAudioUrl = null;
 
-/* ---------- Idle detection (no response) ---------- */
+/* ---------- NEW: Idle detection (no response) ---------- */
 const NO_RESPONSE = {
   FIRST_NUDGE_MS: 20_000,
   END_CALL_MS: 20_000,
@@ -179,7 +197,7 @@ const NO_RESPONSE = {
 };
 
 let idleArmed = false;
-let idleStep = 0;
+let idleStep = 0; // 0=none, 1=nudged
 let idleTimer1 = null;
 let idleTimer2 = null;
 let lastUserActivityAt = Date.now();
@@ -194,12 +212,66 @@ const log = (...a) => DEBUG && console.log("[SOW]", ...a);
 const warn = (...a) => DEBUG && console.warn("[SOW]", ...a);
 const trimText = (s, n = 360) => (s || "").trim().slice(0, n);
 
+/* ---------- Debug HUD (UI overlay) ---------- */
+function renderDebugHud() {
+  if (!DEBUG_HUD) return;
+  let el = document.getElementById("sow-debug-hud");
+  if (!el) {
+    el = document.createElement("div");
+    el.id = "sow-debug-hud";
+    el.style.cssText = `
+      position: fixed; z-index: 999999;
+      left: 10px; right: 10px; bottom: 10px;
+      padding: 10px 12px;
+      background: rgba(0,0,0,.78);
+      color: #fff;
+      font: 12px/1.35 system-ui, -apple-system, Segoe UI, Roboto, Arial;
+      border-radius: 10px;
+      white-space: pre-wrap;
+      word-break: break-word;
+      max-height: 35vh;
+      overflow: auto;
+    `;
+    document.body.appendChild(el);
+  }
+
+  const lines = [
+    `Mobile: ${IS_MOBILE}`,
+    `DG enabled: ${DG.enable}`,
+    `DG status: ${window.__SOW_DG_STATUS || "(not started)"}`,
+    `WS state: ${window.__SOW_DG_WS_STATE ?? ""}`,
+    `Token OK: ${window.__SOW_DG_TOKEN_OK ?? ""}`,
+    `Last msg: ${window.__SOW_DG_LASTMSG || ""}`,
+    `Last err: ${window.__SOW_DG_ERR || ""}`,
+  ].filter(Boolean);
+
+  el.textContent = lines.join("\n");
+}
+
+function dgHudStatus(s) {
+  window.__SOW_DG_STATUS = String(s || "");
+  renderDebugHud();
+}
+function dgHudErr(e) {
+  window.__SOW_DG_ERR = String(e || "");
+  renderDebugHud();
+}
+function dgHudMsg(m) {
+  window.__SOW_DG_LASTMSG = String(m || "");
+  renderDebugHud();
+}
+function dgHudWsState(v) {
+  window.__SOW_DG_WS_STATE = v;
+  renderDebugHud();
+}
+function dgHudToken(ok) {
+  window.__SOW_DG_TOKEN_OK = ok ? "yes" : "no";
+  renderDebugHud();
+}
+
 function nowHHMM() {
   try {
-    return new Date().toLocaleTimeString([], {
-      hour: "2-digit",
-      minute: "2-digit",
-    });
+    return new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
   } catch {
     return "";
   }
@@ -277,7 +349,7 @@ function setTranscriptInterim(_speaker, text) {
   if (t) scrollTranscriptToBottom();
 }
 
-/* ---------- Idle helpers ---------- */
+/* ---------- NEW: Idle detection helpers ---------- */
 function noteUserActivity() {
   lastUserActivityAt = Date.now();
   cancelIdleTimers();
@@ -295,10 +367,7 @@ function armIdleAfterAI() {
   cancelIdleTimers();
   idleArmed = true;
   idleStep = 0;
-  idleTimer1 = setTimeout(
-    () => maybeRunNoResponseNudge(),
-    NO_RESPONSE.FIRST_NUDGE_MS
-  );
+  idleTimer1 = setTimeout(() => maybeRunNoResponseNudge(), NO_RESPONSE.FIRST_NUDGE_MS);
 }
 
 function disarmIdle(reason = "") {
@@ -318,19 +387,16 @@ function shouldConsiderIdle() {
   return true;
 }
 
-/* ---------- call-coach system_event helpers ---------- */
 async function callCoachSystemEvent(eventType) {
   const user_id = getUserIdForWebhook();
   const device = getOrCreateDeviceId();
 
   if (!currentCallId) {
     try {
-      currentCallId =
-        localStorage.getItem("last_call_id") || crypto.randomUUID();
+      currentCallId = localStorage.getItem("last_call_id") || crypto.randomUUID();
       localStorage.setItem("last_call_id", currentCallId);
     } catch {
-      currentCallId =
-        currentCallId || `call_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+      currentCallId = currentCallId || `call_${Date.now()}_${Math.random().toString(36).slice(2)}`;
     }
   }
 
@@ -349,9 +415,7 @@ async function callCoachSystemEvent(eventType) {
 
   if (!resp.ok) {
     const t = await resp.text().catch(() => "");
-    throw new Error(
-      `call-coach system_event ${resp.status}: ${t || resp.statusText}`
-    );
+    throw new Error(`call-coach system_event ${resp.status}: ${t || resp.statusText}`);
   }
 
   const data = await resp.json().catch(() => ({}));
@@ -376,7 +440,9 @@ async function playJsonTTS({ text, b64, mime }, { ringColor = "#d4a373" } = {}) 
     if (text) addTranscriptTurn("assistant", text);
     await safePlayOnce(url, { limitMs: 60_000, color: ringColor });
   } finally {
-    try { URL.revokeObjectURL(url); } catch {}
+    try {
+      URL.revokeObjectURL(url);
+    } catch {}
   }
 }
 
@@ -407,10 +473,7 @@ async function maybeRunNoResponseNudge() {
     }
 
     idleStep = 1;
-    idleTimer2 = setTimeout(
-      () => maybeRunNoResponseEnd(),
-      NO_RESPONSE.END_CALL_MS
-    );
+    idleTimer2 = setTimeout(() => maybeRunNoResponseEnd(), NO_RESPONSE.END_CALL_MS);
   }
 }
 
@@ -460,9 +523,7 @@ function updateCallTimer() {
   const elapsedSec = Math.floor((Date.now() - callStartedAt) / 1000);
   const mins = Math.floor(elapsedSec / 60);
   const secs = elapsedSec % 60;
-  callTimerEl.textContent = `${String(mins).padStart(2, "0")}:${String(
-    secs
-  ).padStart(2, "0")}`;
+  callTimerEl.textContent = `${String(mins).padStart(2, "0")}:${String(secs).padStart(2, "0")}`;
 }
 
 function startCallTimer() {
@@ -472,7 +533,7 @@ function startCallTimer() {
   callTimerInterval = setInterval(updateCallTimer, 1000);
 }
 
-/* ---------- Conversation title helper ---------- */
+/* Derive a short conversation title from first user utterance */
 function deriveTitleFromText(raw) {
   let t = (raw || "").replace(/\s+/g, " ").trim();
   if (!t) return null;
@@ -637,7 +698,7 @@ function buildRollingSummary(prevSummary, pairs, newest, maxChars = SUMMARY_MAX_
   return summary.length ? summary : sentences.join(" ").slice(-maxChars);
 }
 
-/* ---------- UI: Chat (still wired for n8n) ---------- */
+/* ---------- UI: Chat ---------- */
 function ensureChatUI() {
   if (!chatPanel) {
     chatPanel = document.createElement("div");
@@ -788,9 +849,13 @@ let ringRAF = null;
 function stopRing() {
   if (ringRAF) cancelAnimationFrame(ringRAF);
   ringRAF = null;
-  try { ringAnalyser?.disconnect(); } catch {}
+  try {
+    ringAnalyser?.disconnect();
+  } catch {}
   if (ringCtx && ringCtx.state !== "closed") {
-    try { ringCtx.close(); } catch {}
+    try {
+      ringCtx.close();
+    } catch {}
   }
   ringCtx = ringAnalyser = null;
   drawVoiceRing();
@@ -852,7 +917,7 @@ function animateRingFromElement(mediaEl, color = "#d4a373") {
   if (!mediaEl.paused && !mediaEl.ended) start();
 }
 
-/* ---------- VAD ---------- */
+/* ---------- VAD (endless recording; stop after silence) ---------- */
 const VAD = {
   SILENCE_THRESHOLD: 5,
   SILENCE_TIMEOUT_MS: 3000,
@@ -932,7 +997,9 @@ function stopMicVAD() {
     vadAnalyser?.disconnect();
   } catch {}
   if (vadCtx && vadCtx.state !== "closed") {
-    try { vadCtx.close(); } catch {}
+    try {
+      vadCtx.close();
+    } catch {}
   }
   vadCtx = vadAnalyser = vadSource = null;
 }
@@ -946,7 +1013,7 @@ const DG = {
   smart_format: true,
   punctuate: true,
   interim_results: true,
-  vad_events: true,
+  vad_events: false,
   endpointing: 50,
   sample_rate: 16000,
 };
@@ -958,7 +1025,8 @@ let dgProcessor = null;
 let dgInputSampleRate = 48000;
 let dgInterim = "";
 
-function downsampleTo(float32, inSampleRate, outSampleRate) {
+// Minimal downsampler Float32 -> Int16 PCM
+function downsampleTo16k(float32, inSampleRate, outSampleRate = 16000) {
   if (outSampleRate === inSampleRate) return float32;
 
   const ratio = inSampleRate / outSampleRate;
@@ -967,6 +1035,7 @@ function downsampleTo(float32, inSampleRate, outSampleRate) {
 
   let offsetResult = 0;
   let offsetBuffer = 0;
+
   while (offsetResult < result.length) {
     const nextOffsetBuffer = Math.round((offsetResult + 1) * ratio);
     let accum = 0;
@@ -994,29 +1063,38 @@ function floatTo16BitPCM(float32) {
 }
 
 async function fetchDeepgramToken() {
-  // ✅ long enough for real calls (15 minutes)
-  const resp = await fetch(`${DEEPGRAM_TOKEN_ENDPOINT}?ttl=900`, { method: "GET" });
+  dgHudStatus("token: fetching");
+  const resp = await fetch(`${DEEPGRAM_TOKEN_ENDPOINT}?ttl=60`, { method: "GET" });
   if (!resp.ok) {
     const t = await resp.text().catch(() => "");
+    dgHudToken(false);
     throw new Error(`Deepgram token HTTP ${resp.status}: ${t || resp.statusText}`);
   }
   const data = await resp.json().catch(() => ({}));
-  if (!data.access_token) throw new Error("Deepgram token missing access_token");
+  if (!data.access_token) {
+    dgHudToken(false);
+    throw new Error("Deepgram token missing access_token");
+  }
+  dgHudToken(true);
+  dgHudStatus("token: ok");
   return data.access_token;
 }
 
-function buildDeepgramWsUrl() {
+function buildDeepgramWsUrl(token) {
   const u = new URL(DG.endpoint);
   u.searchParams.set("model", DG.model);
   u.searchParams.set("language", DG.language);
   u.searchParams.set("smart_format", String(!!DG.smart_format));
   u.searchParams.set("punctuate", String(!!DG.punctuate));
   u.searchParams.set("interim_results", String(!!DG.interim_results));
-  u.searchParams.set("vad_events", String(!!DG.vad_events));
   u.searchParams.set("endpointing", String(DG.endpointing));
   u.searchParams.set("encoding", "linear16");
   u.searchParams.set("sample_rate", String(DG.sample_rate));
   u.searchParams.set("channels", "1");
+
+  // Deepgram supports passing temporary token as query param for browser WS
+  u.searchParams.set("token", token);
+
   return u.toString();
 }
 
@@ -1024,54 +1102,86 @@ function stopDeepgramRecognizer() {
   try {
     if (dgProcessor) dgProcessor.onaudioprocess = null;
   } catch {}
-  try { dgProcessor?.disconnect(); } catch {}
-  try { dgSource?.disconnect(); } catch {}
+  try {
+    dgProcessor?.disconnect();
+  } catch {}
+  try {
+    dgSource?.disconnect();
+  } catch {}
   dgProcessor = dgSource = null;
 
   if (dgCtx && dgCtx.state !== "closed") {
-    try { dgCtx.close(); } catch {}
+    try {
+      dgCtx.close();
+    } catch {}
   }
   dgCtx = null;
 
   if (dgSocket) {
-    try { dgSocket.close(); } catch {}
+    try {
+      dgSocket.close();
+    } catch {}
   }
   dgSocket = null;
-
   dgInterim = "";
+  dgHudStatus("stopped");
+  dgHudWsState("");
 }
 
 async function startDeepgramRecognizer(stream) {
   if (!DG.enable) return false;
+
   stopDeepgramRecognizer();
+  dgHudStatus("starting");
 
   let token = "";
   try {
     token = await fetchDeepgramToken();
   } catch (e) {
     warn("Deepgram token fetch failed:", e);
+    dgHudErr(`token: ${String(e?.message || e)}`);
+    dgHudStatus("token failed");
     return false;
   }
 
-  const wsUrl = buildDeepgramWsUrl();
+  const wsUrl = buildDeepgramWsUrl(token);
+  dgHudStatus("ws: connecting");
 
   let socket;
   try {
-    // ✅ Auth via subprotocol (reliable in browsers)
-    socket = new WebSocket(wsUrl, ["token", token]);
+    socket = new WebSocket(wsUrl);
   } catch (e) {
     warn("Deepgram WebSocket create failed:", e);
+    dgHudErr(`ws create: ${String(e?.message || e)}`);
+    dgHudStatus("ws create failed");
     return false;
   }
 
   dgSocket = socket;
 
-  socket.onopen = () => log("[SOW] Deepgram WS open");
-  socket.onerror = (e) => warn("[SOW] Deepgram WS error", e);
-  socket.onclose = () => log("[SOW] Deepgram WS closed");
+  socket.onopen = () => {
+    log("[SOW] Deepgram WS open");
+    dgHudStatus("ws: open");
+    dgHudWsState(socket.readyState);
+  };
+
+  socket.onerror = (e) => {
+    warn("[SOW] Deepgram WS error", e);
+    dgHudErr("ws error");
+    dgHudStatus("ws error");
+    dgHudWsState(socket.readyState);
+  };
+
+  socket.onclose = (evt) => {
+    log("[SOW] Deepgram WS closed", evt?.code, evt?.reason || "");
+    dgHudStatus(`ws closed: ${evt?.code || ""} ${evt?.reason || ""}`.trim());
+    dgHudWsState(socket.readyState);
+  };
 
   socket.onmessage = (evt) => {
     try {
+      dgHudWsState(socket.readyState);
+
       const msg = JSON.parse(evt.data);
       const alt = msg?.channel?.alternatives?.[0];
       const transcript = (alt?.transcript || "").trim();
@@ -1082,45 +1192,45 @@ async function startDeepgramRecognizer(stream) {
         return;
       }
 
+      dgHudMsg(`${isFinal ? "final" : "interim"}: ${transcript.slice(0, 80)}`);
+
       if (isFinal) {
         transcriptUI.addFinalLine(transcript);
-
-        // ✅ CRITICAL for your pipeline:
-        // uploadRecordingAndNotify() uses finalSegments to create user_turn
-        finalSegments.push(transcript);
-
         dgInterim = "";
       } else {
         dgInterim = transcript;
         transcriptUI.setInterim(dgInterim);
-        noteUserActivity();
       }
-    } catch {
-      // ignore
+    } catch (e) {
+      // ignore non-JSON frames
     }
   };
 
+  // Audio graph: stream -> AudioContext -> ScriptProcessor -> PCM16 -> WS
   dgCtx = new (window.AudioContext || window.webkitAudioContext)();
   if (dgCtx.state === "suspended") dgCtx.resume().catch(() => {});
   dgInputSampleRate = dgCtx.sampleRate || 48000;
 
   dgSource = dgCtx.createMediaStreamSource(stream);
 
+  // ScriptProcessor is deprecated but still widely supported (including Safari)
   const bufferSize = 4096;
   dgProcessor = dgCtx.createScriptProcessor(bufferSize, 1, 1);
   dgSource.connect(dgProcessor);
-  dgProcessor.connect(dgCtx.destination);
+  dgProcessor.connect(dgCtx.destination); // required in some browsers
 
   dgProcessor.onaudioprocess = (e) => {
     if (!dgSocket || dgSocket.readyState !== WebSocket.OPEN) return;
     try {
       const input = e.inputBuffer.getChannelData(0);
-      const down = downsampleTo(input, dgInputSampleRate, DG.sample_rate);
+      const down = downsampleTo16k(input, dgInputSampleRate, DG.sample_rate);
       const pcm16 = floatTo16BitPCM(down);
       dgSocket.send(pcm16);
+      noteUserActivity();
     } catch {}
   };
 
+  dgHudStatus("streaming");
   return true;
 }
 
@@ -1208,8 +1318,7 @@ speakerBtn?.addEventListener("click", async () => {
   }
   updateSpeakerUI();
   if (wasMuted && !speakerMuted && "setSinkId" in HTMLMediaElement.prototype) {
-    if (!preferredOutputDeviceId)
-      preferredOutputDeviceId = await pickSpeakerOutputDevice();
+    if (!preferredOutputDeviceId) preferredOutputDeviceId = await pickSpeakerOutputDevice();
     if (preferredOutputDeviceId) {
       for (const el of managedAudios) await routeElementToPreferredOutput(el);
       statusText.textContent = "Speaker output active.";
@@ -1234,8 +1343,14 @@ document.addEventListener("keydown", (e) => {
   }
 });
 
-tsClearBtn?.addEventListener("click", () => transcriptUI.clearAll());
-tsAutoScrollBtn?.addEventListener("click", () => setAutoScroll(!autoScrollOn));
+/* Inline transcript panel controls */
+tsClearBtn?.addEventListener("click", () => {
+  transcriptUI.clearAll();
+});
+
+tsAutoScrollBtn?.addEventListener("click", () => {
+  setAutoScroll(!autoScrollOn);
+});
 
 /* ---------- Greeting (ALWAYS transcribable) ---------- */
 async function fetchGreetingJSON() {
@@ -1271,7 +1386,9 @@ async function prepareGreetingForNextCall() {
       greetingPayload = payload;
 
       if (greetingAudioUrl) {
-        try { URL.revokeObjectURL(greetingAudioUrl); } catch {}
+        try {
+          URL.revokeObjectURL(greetingAudioUrl);
+        } catch {}
       }
       greetingAudioUrl = base64ToBlobUrl(payload.audio_base64, payload.mime);
       log("[SOW] Greeting prefetched (JSON).");
@@ -1280,7 +1397,9 @@ async function prepareGreetingForNextCall() {
       warn("Greeting prefetch failed", e);
       greetingPayload = null;
       if (greetingAudioUrl) {
-        try { URL.revokeObjectURL(greetingAudioUrl); } catch {}
+        try {
+          URL.revokeObjectURL(greetingAudioUrl);
+        } catch {}
       }
       greetingAudioUrl = null;
       return false;
@@ -1312,6 +1431,12 @@ async function startCall() {
   disarmIdle("startCall");
   noteUserActivity();
 
+  dgHudStatus("call starting");
+  dgHudErr("");
+  dgHudMsg("");
+  dgHudWsState("");
+  dgHudToken(false);
+
   try {
     currentCallId = crypto.randomUUID();
   } catch {
@@ -1335,7 +1460,7 @@ async function startCall() {
     if (!isCalling) return;
 
     if (!greetingOk) {
-      statusText.textContent = "Greeting failed. Please tap Call again.";
+      statusText.textContent = "Greeting failed. Please tap Call again in a moment.";
       endCall();
       return;
     }
@@ -1345,7 +1470,9 @@ async function startCall() {
 
     if (greetingAudioUrl) {
       await safePlayOnce(greetingAudioUrl, { limitMs: 60000 });
-      try { URL.revokeObjectURL(greetingAudioUrl); } catch {}
+      try {
+        URL.revokeObjectURL(greetingAudioUrl);
+      } catch {}
       greetingAudioUrl = null;
     }
 
@@ -1378,7 +1505,7 @@ function endCall() {
   stopRing();
   stopBargeInMonitor();
 
-  // stop Deepgram stream if active
+  // stop Deepgram
   stopDeepgramRecognizer();
 
   try {
@@ -1403,12 +1530,16 @@ function endCall() {
   }
 
   if (greetingAudioUrl) {
-    try { URL.revokeObjectURL(greetingAudioUrl); } catch {}
+    try {
+      URL.revokeObjectURL(greetingAudioUrl);
+    } catch {}
     greetingAudioUrl = null;
   }
+
+  dgHudStatus("call ended");
 }
 
-/* Small one-shot clips */
+/* Small one-shot clips (ring/greeting/etc) */
 function safePlayOnce(src, { limitMs = 15000, color = "#d4a373" } = {}) {
   return new Promise((res) => {
     const a = new Audio(src);
@@ -1449,8 +1580,10 @@ async function startRecordingLoop() {
     const ok = await captureOneTurn();
     if (!isCalling) break;
     if (!ok) continue;
+
     const played = await uploadRecordingAndNotify();
     if (!isCalling) break;
+
     statusText.textContent = played ? "Your turn – I’m listening…" : "Listening again…";
   }
 }
@@ -1470,12 +1603,15 @@ function commitInterimToFinal() {
 }
 
 function openNativeRecognizer() {
-  // Mobile uses Deepgram; skip WebSpeech
-  if (DG.enable) return;
+  // If Deepgram is enabled (mobile-only), prefer it over WebSpeech
+  if (DG.enable) {
+    log("[SOW] Mobile detected: using Deepgram for live transcription");
+    return;
+  }
 
   const ASR = window.SpeechRecognition || window.webkitSpeechRecognition;
-
   log("ASR available?", !!ASR, ASR);
+
   if (!ASR) {
     warn("Web Speech API not available; no desktop live captions.");
     transcriptUI.setInterim("Listening…");
@@ -1517,11 +1653,20 @@ function openNativeRecognizer() {
 
   r.onend = () => {
     if (isCalling && isRecording) {
-      try { r.start(); } catch {}
+      try {
+        r.start();
+      } catch (err) {
+        warn("ASR restart failed:", err);
+      }
     }
   };
 
-  try { r.start(); } catch {}
+  try {
+    r.start();
+  } catch (err) {
+    warn("ASR start() threw immediately:", err);
+  }
+
   speechRecognizer = r;
 }
 
@@ -1542,6 +1687,7 @@ async function captureOneTurn() {
   if (!isCalling || isRecording || isPlayingAI) return false;
 
   statusText.textContent = "Your turn – I’m listening…";
+
   finalSegments = [];
   interimBuffer = "";
   transcriptUI.setInterim("Listening…");
@@ -1571,6 +1717,7 @@ async function captureOneTurn() {
       opts.mimeType = "audio/webm";
       if (ENABLE_MEDIARECORDER_64KBPS) opts.audioBitsPerSecond = 64_000;
     }
+
     try {
       mediaRecorder = new MediaRecorder(stream, opts);
     } catch {
@@ -1603,14 +1750,10 @@ async function captureOneTurn() {
 
     startMicVAD(stream, "#d4a373");
 
-    // Start captions:
+    // Start captions
     openNativeRecognizer();
     if (DG.enable) {
-      const ok = await startDeepgramRecognizer(stream).catch((e) => {
-        warn("Deepgram start failed", e);
-        return false;
-      });
-      if (!ok) warn("[SOW] Deepgram did not start; no mobile captions.");
+      startDeepgramRecognizer(stream).catch((e) => warn("Deepgram start failed", e));
     }
 
     HumeRealtime.startTurn?.(stream, vadCtx);
@@ -1633,475 +1776,270 @@ async function captureOneTurn() {
   }
 }
 
-/* ====== PART 1 ENDS HERE ====== */
-/* Paste PART 2 immediately after this line */
-/* ====== CALL.JS — PART 2/2 ====== */
+/* ===== PART 2 continues below ===== */
+/* ===== PART 2/2 — app/call.js continues ===== */
 
-/* ---------- BARGE-IN (interrupt during AI playback) ---------- */
-const BARGE = {
-  enable: true,
-  rmsThresh: 8,
-  holdMs: 120,
-  cooldownMs: 400,
-};
-let bargeCtx = null;
-let bargeSrc = null;
-let bargeAnalyser = null;
-let bargeRAF = null;
+/* ---------- Upload turn + coach response ---------- */
+async function uploadRecordingAndNotify() {
+  if (!recordChunks?.length) return false;
 
-async function ensureLiveMicForBargeIn() {
-  try {
-    if (
-      globalStream &&
-      globalStream.getAudioTracks().some((t) => t.readyState === "live")
-    ) {
-      globalStream.getAudioTracks().forEach((t) => {
-        if (t.enabled === false) t.enabled = true;
-      });
-      return true;
-    }
-    const s = await navigator.mediaDevices.getUserMedia({
-      audio: {
-        echoCancellation: true,
-        noiseSuppression: true,
-        autoGainControl: true,
-      },
-    });
-    globalStream = s;
-    updateMicTracks();
-    return true;
-  } catch (e) {
-    warn("barge-in mic error", e);
-    return false;
+  // combine transcript segments
+  const transcript = finalSegments.join(" ").replace(/\s+/g, " ").trim();
+
+  // try setting conversation title from first meaningful user line
+  if (transcript) {
+    maybeUpdateConversationTitleFromTranscript(transcript).catch(() => {});
   }
-}
 
-function startBargeInMonitor(onInterrupt) {
-  stopBargeInMonitor();
-  if (!BARGE.enable || !globalStream) return;
+  noteUserActivity(); // user spoke
 
-  bargeCtx = new (window.AudioContext || window.webkitAudioContext)();
-  if (bargeCtx.state === "suspended") bargeCtx.resume().catch(() => {});
-  bargeSrc = bargeCtx.createMediaStreamSource(globalStream);
-  bargeAnalyser = bargeCtx.createAnalyser();
-  bargeAnalyser.fftSize = 1024;
-  bargeAnalyser.smoothingTimeConstant = 0.8;
-  bargeSrc.connect(bargeAnalyser);
+  // Build blob
+  const mime = mediaRecorder?.mimeType || "audio/webm";
+  const blob = new Blob(recordChunks, { type: mime });
+  recordChunks = [];
 
-  const data = new Uint8Array(bargeAnalyser.fftSize);
-  let hold = 0;
-  let armed = false;
-  let sinceArm = 0;
+  // Upload to Supabase storage (optional; if missing service role, skip upload)
+  let audioUrl = "";
+  const user_id = getUserIdForWebhook();
+  const device = getOrCreateDeviceId();
 
-  const loop = () => {
-    if (!bargeAnalyser) return;
-    bargeAnalyser.getByteTimeDomainData(data);
-    let sum = 0;
-    for (let i = 0; i < data.length; i++) {
-      const v = data[i] - 128;
-      sum += v * v;
-    }
-    const rms = Math.sqrt(sum / data.length);
+  if (HAS_SUPABASE) {
+    try {
+      const fileName = `${RECORDINGS_FOLDER}/${device}/${Date.now()}.webm`;
+      const { data, error } = await supabase.storage
+        .from(SUPABASE_BUCKET)
+        .upload(fileName, blob, {
+          contentType: mime,
+          upsert: false,
+        });
 
-    if (!armed) {
-      sinceArm += 16;
-      if (sinceArm >= BARGE.cooldownMs) armed = true;
-    } else {
-      if (rms > BARGE.rmsThresh) {
-        hold += 16;
-        if (hold >= BARGE.holdMs) {
-          try {
-            onInterrupt?.();
-          } catch {}
-          stopBargeInMonitor();
-          return;
-        }
-      } else {
-        hold = 0;
+      if (!error && data?.path) {
+        const { data: pub } = supabase.storage
+          .from(SUPABASE_BUCKET)
+          .getPublicUrl(data.path);
+        audioUrl = pub?.publicUrl || "";
       }
+    } catch (e) {
+      warn("Storage upload failed (continuing without URL)", e);
     }
-    bargeRAF = requestAnimationFrame(loop);
+  }
+
+  // Rolling summary (optional)
+  const prevSummary = await fetchRollingSummary(user_id, device);
+  const { pairs } = await fetchLastPairsFromSupabase(user_id, { pairs: 6 });
+  const rolling_summary = buildRollingSummary(prevSummary, pairs, transcript);
+
+  // Call coach
+  const payload = {
+    source: "voice",
+    user_id,
+    device_id: device,
+    call_id: currentCallId,
+    conversationId: conversationId || null,
+    transcript: transcript || "",
+    user_turn: transcript || "",
+    rolling_summary: rolling_summary || "",
+    audio_url: audioUrl || "",
   };
 
-  bargeRAF = requestAnimationFrame(loop);
+  statusText.textContent = "Thinking…";
+
+  let data = null;
+  try {
+    const resp = await fetch(CALL_COACH_ENDPOINT, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+
+    if (!resp.ok) {
+      const t = await resp.text().catch(() => "");
+      throw new Error(`call-coach HTTP ${resp.status}: ${t || resp.statusText}`);
+    }
+
+    data = await resp.json().catch(() => ({}));
+  } catch (e) {
+    warn("call-coach request failed", e);
+    statusText.textContent = "Network error. Listening again…";
+    return false;
+  }
+
+  // Save rolling summary for next turn
+  if (rolling_summary) upsertRollingSummary(user_id, device, rolling_summary).catch(() => {});
+
+  // AI response text
+  const assistant_text = (data.assistant_text || data.text || "").toString().trim();
+  if (assistant_text) addTranscriptTurn("assistant", assistant_text);
+
+  // Play audio if provided
+  const audio_base64 = data.audio_base64 || "";
+  const outMime = data.mime || "audio/mpeg";
+
+  if (!audio_base64) {
+    statusText.textContent = "No audio returned. Listening…";
+    // arm idle after AI (but AI didn't speak audio; still treat as done)
+    lastAIFinishedAt = Date.now();
+    armIdleAfterAI();
+    return false;
+  }
+
+  const url = base64ToBlobUrl(audio_base64, outMime);
+
+  // Barge-in: if user starts talking, we can stop playback
+  isPlayingAI = true;
+  statusText.textContent = "AI speaking…";
+
+  try {
+    await playWithBargeIn(url, { limitMs: 120000 });
+  } catch (e) {
+    warn("AI playback failed", e);
+  } finally {
+    isPlayingAI = false;
+    lastAIFinishedAt = Date.now();
+    armIdleAfterAI();
+
+    try {
+      URL.revokeObjectURL(url);
+    } catch {}
+  }
+
+  return true;
+}
+
+/* ---------- Playback with barge-in (stop AI if user speaks) ---------- */
+let bargeStream = null;
+let bargeCtx = null;
+let bargeSource = null;
+let bargeAnalyser = null;
+let bargeRAF = null;
+let bargeTriggered = false;
+
+const BARGE = {
+  THRESH: 10, // avg abs deviation
+  HOLD_MS: 240,
+};
+
+function startBargeInMonitor() {
+  stopBargeInMonitor();
+
+  if (!navigator.mediaDevices?.getUserMedia) return;
+
+  navigator.mediaDevices
+    .getUserMedia({ audio: true })
+    .then((s) => {
+      bargeStream = s;
+      bargeCtx = new (window.AudioContext || window.webkitAudioContext)();
+      if (bargeCtx.state === "suspended") bargeCtx.resume().catch(() => {});
+      bargeSource = bargeCtx.createMediaStreamSource(s);
+      bargeAnalyser = bargeCtx.createAnalyser();
+      bargeAnalyser.fftSize = 2048;
+      bargeAnalyser.smoothingTimeConstant = 0.7;
+      bargeSource.connect(bargeAnalyser);
+
+      const data = new Uint8Array(bargeAnalyser.fftSize);
+      let above = 0;
+
+      const loop = () => {
+        if (!bargeAnalyser) return;
+        bargeAnalyser.getByteTimeDomainData(data);
+        let sum = 0;
+        for (let i = 0; i < data.length; i++) sum += Math.abs(data[i] - 128);
+        const level = sum / data.length;
+
+        if (level > BARGE.THRESH) above += 16;
+        else above = Math.max(0, above - 24);
+
+        if (above > BARGE.HOLD_MS) {
+          bargeTriggered = true;
+        }
+
+        bargeRAF = requestAnimationFrame(loop);
+      };
+
+      bargeRAF = requestAnimationFrame(loop);
+    })
+    .catch(() => {});
 }
 
 function stopBargeInMonitor() {
   if (bargeRAF) cancelAnimationFrame(bargeRAF);
   bargeRAF = null;
+
   try {
-    bargeSrc?.disconnect();
+    bargeSource?.disconnect();
     bargeAnalyser?.disconnect();
   } catch {}
+
   if (bargeCtx && bargeCtx.state !== "closed") {
     try {
       bargeCtx.close();
     } catch {}
   }
-  bargeCtx = bargeSrc = bargeAnalyser = null;
+
+  try {
+    bargeStream?.getTracks().forEach((t) => t.stop());
+  } catch {}
+
+  bargeStream = bargeCtx = bargeSource = bargeAnalyser = null;
+  bargeTriggered = false;
 }
 
-/* Unified AI playback */
-async function playAIWithBargeIn(
-  playableUrl,
-  { aiBlob = null, aiBubbleEl = null } = {}
-) {
-  return new Promise(async (resolve) => {
-    statusText.textContent = "AI replying…";
-    isPlayingAI = true;
+async function playWithBargeIn(src, { limitMs = 60000 } = {}) {
+  bargeTriggered = false;
+  startBargeInMonitor();
 
-    disarmIdle("AI playback start");
-
-    const a = new Audio(playableUrl);
+  return new Promise((resolve) => {
+    const a = new Audio(src);
+    a.preload = "auto";
     registerAudioElement(a);
     animateRingFromElement(a, "#d4a373");
 
-    if (!aiBubbleEl && inChatView) aiBubbleEl = appendMsg("ai", "", { typing: true });
+    let done = false;
 
-    if (aiBlob && N8N_TRANSCRIBE_URL) {
+    const settle = (ok) => {
+      if (done) return;
+      done = true;
       try {
-        liveTranscribeBlob(aiBlob, aiBubbleEl).catch(() => {});
+        a.pause();
       } catch {}
-    }
-
-    const okMic = await ensureLiveMicForBargeIn();
-
-    let interrupted = false;
-    let cleaned = false;
-
-    const finish = (reason) => {
-      if (cleaned) return;
-      cleaned = true;
-
       stopRing();
       stopBargeInMonitor();
-      isPlayingAI = false;
-
-      lastAIFinishedAt = Date.now();
-      if (isCalling) armIdleAfterAI();
-
-      if (reason === "blocked") {
-        statusText.textContent =
-          "I couldn’t play audio on this device. Check your volume or browser settings.";
-      }
-
-      resolve({ interrupted });
+      resolve(ok);
     };
 
-    if (okMic) {
-      startBargeInMonitor(() => {
-        interrupted = true;
-        try {
-          a.pause();
-        } catch {}
-        statusText.textContent = "Go ahead…";
-        noteUserActivity();
-        finish("barge");
-      });
-    }
+    a.oncanplaythrough = () => {
+      try {
+        a.play().catch(() => settle(false));
+      } catch {
+        settle(false);
+      }
+    };
 
-    a.onended = () => finish("ended");
-    a.onabort = () => finish("abort");
-    a.onerror = () => finish("error");
+    a.onerror = () => settle(false);
+    a.onabort = () => settle(false);
+    a.onended = () => settle(true);
 
-    try {
-      await a.play();
-    } catch {
-      finish("blocked");
-    }
+    const t = setTimeout(() => settle(false), limitMs);
+
+    const poll = () => {
+      if (done) return;
+      if (bargeTriggered) {
+        clearTimeout(t);
+        settle(true); // stop AI early
+        return;
+      }
+      requestAnimationFrame(poll);
+    };
+    requestAnimationFrame(poll);
   });
 }
 
-/* ---------- Voice path: upload → Supabase (optional) → call-coach ---------- */
-const RECENT_USER_KEEP = 12;
-let recentUserTurns = [];
-
-async function uploadRecordingAndNotify() {
-  if (!isCalling) return false;
-
-  const finalText = finalSegments.join(" ").trim();
-  const interimText = (interimBuffer || "").trim();
-  const combinedTranscript = finalText || interimText || "";
-
-  if (combinedTranscript) {
-    noteUserActivity();
-    recentUserTurns.push(combinedTranscript);
-    if (recentUserTurns.length > RECENT_USER_KEEP) {
-      recentUserTurns.splice(0, recentUserTurns.length - RECENT_USER_KEEP);
-    }
-    maybeUpdateConversationTitleFromTranscript(combinedTranscript).catch(() => {});
-  }
-
+/* ---------- Chat -> n8n (kept as-is) ---------- */
+async function sendChatToN8N(message) {
   const user_id = getUserIdForWebhook();
-  const device = getOrCreateDeviceId();
+  const device_id = getOrCreateDeviceId();
 
-  if (!currentCallId) {
-    try {
-      currentCallId = localStorage.getItem("last_call_id") || crypto.randomUUID();
-      localStorage.setItem("last_call_id", currentCallId);
-    } catch {
-      currentCallId =
-        currentCallId || `call_${Date.now()}_${Math.random().toString(36).slice(2)}`;
-    }
-  }
-
-  const mimeType = mediaRecorder?.mimeType || "audio/webm";
-  const blob = new Blob(recordChunks, { type: mimeType });
-
-  if (!blob.size || !isCalling) {
-    statusText.textContent = "I didn’t catch any audio. Let’s try again.";
-    return false;
-  }
-
-  statusText.textContent = "Thinking…";
-
-  let historyPairsText = "";
-  let historyPairs = [];
-  try {
-    const hist = await fetchLastPairsFromSupabase(user_id, { pairs: 8 });
-    historyPairsText = hist.text || "";
-    historyPairs = hist.pairs || [];
-  } catch {}
-
-  const prevSummary = await fetchRollingSummary(user_id, device);
-  const rollingSummary = buildRollingSummary(prevSummary, historyPairs, combinedTranscript);
-
-  const transcriptForModel = historyPairsText
-    ? `Previous conversation (last ${Math.min(historyPairs.length, 8)} pairs), oldest→newest:\n${historyPairsText}\n\nUser now says:\n${combinedTranscript}`
-    : combinedTranscript;
-
-  let uploaded = false;
-  if (HAS_SUPABASE) {
-    try {
-      const ext = mimeType.includes("mp4") ? "m4a" : "webm";
-      const filePath = `${RECORDINGS_FOLDER}/${device}/${Date.now()}.${ext}`;
-      const uploadUrl = `${SUPABASE_URL}/storage/v1/object/${encodeURIComponent(
-        SUPABASE_BUCKET
-      )}/${filePath}`;
-      const upRes = await fetch(uploadUrl, {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
-          "Content-Type": blob.type || "application/octet-stream",
-          "x-upsert": "false",
-        },
-        body: blob,
-      });
-      uploaded = upRes.ok;
-      if (!upRes.ok) warn("Supabase upload failed", upRes.status);
-    } catch (e) {
-      warn("Supabase upload error", e);
-    }
-  } else {
-    log("Skipping Supabase upload; HAS_SUPABASE is false.");
-  }
-
-  let aiPlayableUrl = null;
-  let revokeLater = null;
-  let aiBlob = null;
-  let aiTextFromJSON = "";
-
-  try {
-    const body = {
-      user_id,
-      device_id: device,
-      call_id: currentCallId,
-      user_turn: combinedTranscript,
-      transcript: transcriptForModel,
-      has_transcript: !!transcriptForModel,
-      history_user_last3: recentUserTurns.slice(-3),
-      rolling_summary: rollingSummary || undefined,
-      executionMode: "production",
-      source: "voice",
-      audio_uploaded: uploaded,
-      conversationId: conversationId || null,
-      conversation_id: conversationId || null,
-      c: conversationId || null,
-    };
-
-    const resp = await fetch(CALL_COACH_ENDPOINT, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    });
-
-    const ct = (resp.headers.get("content-type") || "").toLowerCase();
-
-    if (ENABLE_STREAMED_PLAYBACK && ct.includes("audio/webm") && resp.body?.getReader) {
-      const ok = await playStreamedWebmOpus(resp.clone());
-      if (ok) {
-        upsertRollingSummary(user_id, device, rollingSummary).catch(() => {});
-        return true;
-      }
-    }
-
-    if (ct.startsWith("audio/") || ct === "application/octet-stream") {
-      aiBlob = await resp.blob();
-      aiPlayableUrl = URL.createObjectURL(aiBlob);
-      revokeLater = aiPlayableUrl;
-    } else if (ct.includes("application/json")) {
-      const data = await resp.json();
-
-      aiTextFromJSON = (
-        data?.assistant_text ??
-        data?.text ??
-        data?.transcript ??
-        data?.message ??
-        ""
-      )
-        .toString()
-        .trim();
-
-      const b64 = data?.audio_base64;
-      const url = data?.result_audio_url || data?.audioUrl || data?.url || data?.fileUrl;
-
-      if (b64 && !url) {
-        const raw = b64.includes(",") ? b64.split(",").pop() : b64;
-        const bytes = Uint8Array.from(atob(raw), (c) => c.charCodeAt(0));
-        aiBlob = new Blob([bytes], { type: data?.mime || "audio/mpeg" });
-        aiPlayableUrl = URL.createObjectURL(aiBlob);
-        revokeLater = aiPlayableUrl;
-      } else if (url) {
-        aiPlayableUrl = url;
-      }
-    } else {
-      aiBlob = await resp.blob();
-      if (aiBlob.size) {
-        aiPlayableUrl = URL.createObjectURL(aiBlob);
-        revokeLater = aiPlayableUrl;
-      }
-    }
-  } catch (e) {
-    warn("call-coach failed", e);
-    statusText.textContent = "AI processing failed.";
-    return false;
-  }
-
-  if (!isCalling) return false;
-  if (!aiPlayableUrl) {
-    statusText.textContent =
-      "AI processing failed, I couldn’t get audio back. Let’s try again.";
-    return false;
-  }
-
-  if (aiTextFromJSON) addTranscriptTurn("assistant", aiTextFromJSON);
-
-  let aiBubble = null;
-  if (inChatView) {
-    aiBubble = appendMsg("ai", "", { typing: true });
-    if (aiTextFromJSON) await typewriter(aiBubble, aiTextFromJSON, 18);
-  }
-
-  const { interrupted } = await playAIWithBargeIn(aiPlayableUrl, {
-    aiBlob: !aiTextFromJSON ? aiBlob : null,
-    aiBubbleEl: aiBubble,
-  });
-
-  if (revokeLater) {
-    try {
-      URL.revokeObjectURL(revokeLater);
-    } catch {}
-  }
-
-  upsertRollingSummary(user_id, device, rollingSummary).catch(() => {});
-  return !interrupted || true;
-}
-
-/* ---------- Live-transcribe the AI Blob through optional webhook ---------- */
-async function liveTranscribeBlob(blob, aiBubbleEl) {
-  if (!N8N_TRANSCRIBE_URL) return;
-
-  const trySSE = async () => {
-    const resp = await fetch(N8N_TRANSCRIBE_URL, {
-      method: "POST",
-      headers: { Accept: "text/event-stream" },
-      body: await blobToFormData(blob, "file", "ai.mp3"),
-    });
-    const ct = (resp.headers.get("content-type") || "").toLowerCase();
-    if (!ct.includes("text/event-stream")) return false;
-    const reader = resp.body.getReader();
-    const decoder = new TextDecoder();
-    let full = "";
-    while (true) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      const chunk = decoder.decode(value, { stream: true });
-      for (const line of chunk.split(/\r?\n/)) {
-        if (!line.startsWith("data:")) continue;
-        const json = line.slice(5).trim();
-        if (!json) continue;
-        try {
-          const evt = JSON.parse(json);
-          if (evt.delta) {
-            full += evt.delta;
-            if (aiBubbleEl) aiBubbleEl.textContent = full;
-          }
-          if (evt.text && evt.done) {
-            if (aiBubbleEl) aiBubbleEl.textContent = evt.text;
-            addTranscriptTurn("assistant", evt.text);
-            setTranscriptInterim("assistant", "");
-            return true;
-          }
-        } catch {}
-      }
-    }
-    if (full) {
-      addTranscriptTurn("assistant", full);
-      setTranscriptInterim("assistant", "");
-    }
-    return !!full;
-  };
-
-  const sseOk = await trySSE().catch(() => false);
-  if (sseOk) return;
-
-  try {
-    const resp = await fetch(N8N_TRANSCRIBE_URL, {
-      method: "POST",
-      body: await blobToFormData(blob, "file", "ai.mp3"),
-    });
-    const data = await resp.json().catch(() => null);
-    const text = data?.text || data?.transcript || "";
-    if (text && aiBubbleEl) await typewriter(aiBubbleEl, text, 18);
-    if (text) {
-      addTranscriptTurn("assistant", text);
-      setTranscriptInterim("assistant", "");
-    }
-  } catch {}
-}
-
-async function blobToFormData(blob, field = "file", filename = "audio.mp3") {
-  const fd = new FormData();
-  fd.append(field, blob, filename);
-  return fd;
-}
-
-/* ---------- Chat path (text → n8n) ---------- */
-async function sendChatToN8N(userText) {
-  const user_id = getUserIdForWebhook();
-  const device = getOrCreateDeviceId();
-
-  recentUserTurns.push(userText);
-  if (recentUserTurns.length > RECENT_USER_KEEP) {
-    recentUserTurns.splice(0, recentUserTurns.length - RECENT_USER_KEEP);
-  }
-
-  maybeUpdateConversationTitleFromTranscript(userText).catch(() => {});
-
-  let historyPairsText = "";
-  let historyPairs = [];
-  try {
-    const hist = await fetchLastPairsFromSupabase(user_id, { pairs: 8 });
-    historyPairsText = hist.text || "";
-    historyPairs = hist.pairs || [];
-  } catch {}
-
-  const prevSummary = await fetchRollingSummary(user_id, device);
-  const rollingSummary = buildRollingSummary(prevSummary, historyPairs, userText);
-
-  const transcriptForModel = historyPairsText
-    ? `Previous conversation (last ${Math.min(historyPairs.length, 8)} pairs), oldest→newest:\n${historyPairsText}\n\nUser now says:\n${userText}`
-    : userText;
+  const typingBubble = appendMsg("ai", "…", { typing: true });
 
   try {
     const resp = await fetch(N8N_WEBHOOK_URL, {
@@ -2109,171 +2047,69 @@ async function sendChatToN8N(userText) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         user_id,
-        transcript: transcriptForModel,
-        has_transcript: !!transcriptForModel,
-        history_user_last3: recentUserTurns.slice(-3),
-        rolling_summary: rollingSummary || undefined,
-        executionMode: "production",
-        source: "chat",
+        device_id,
+        conversationId: conversationId || null,
+        message,
       }),
     });
 
-    const ct = (resp.headers.get("content-type") || "").toLowerCase();
-    let aiText = "";
-    let playableUrl = null;
-    let revoke = null;
-    let b = null;
+    if (!resp.ok) {
+      const t = await resp.text().catch(() => "");
+      throw new Error(`n8n HTTP ${resp.status}: ${t || resp.statusText}`);
+    }
 
-    if (ct.includes("application/json")) {
-      const data = await resp.json();
-      aiText = data?.text ?? data?.transcript ?? data?.message ?? "";
-      const url = data?.result_audio_url || data?.audioUrl || data?.url || data?.fileUrl;
-      const b64 = data?.audio_base64;
-      if (b64 && !url) {
-        const raw = b64.includes(",") ? b64.split(",").pop() : b64;
-        const bytes = Uint8Array.from(atob(raw), (c) => c.charCodeAt(0));
-        b = new Blob([bytes], { type: data?.mime || "audio/mpeg" });
-        playableUrl = URL.createObjectURL(b);
-        revoke = playableUrl;
-      } else if (url) {
-        playableUrl = url;
-      }
-    } else if (ct.startsWith("audio/") || ct === "application/octet-stream") {
-      b = await resp.blob();
-      if (b.size) {
-        playableUrl = URL.createObjectURL(b);
-        revoke = playableUrl;
-      }
+    const data = await resp.json().catch(() => ({}));
+    const reply =
+      (data.reply || data.text || data.output || "").toString().trim() ||
+      "…";
+
+    if (typingBubble) {
+      typingBubble.parentElement?.classList.remove("typing");
+      await typewriter(typingBubble, reply, 12);
     } else {
-      b = await resp.blob();
-      if (b.size) {
-        playableUrl = URL.createObjectURL(b);
-        revoke = playableUrl;
-      }
+      appendMsg("ai", reply);
     }
 
-    const aiBubble = appendMsg("ai", "", { typing: true });
-    if (aiText) {
-      await typewriter(aiBubble, aiText, 18);
-      addTranscriptTurn("assistant", aiText);
-    }
-
-    if (playableUrl) {
-      await playAIWithBargeIn(playableUrl, {
-        aiBlob: !aiText ? b : null,
-        aiBubbleEl: aiBubble,
-      });
-      if (revoke) {
-        try {
-          URL.revokeObjectURL(revoke);
-        } catch {}
-      }
-    }
-
-    upsertRollingSummary(user_id, device, rollingSummary).catch(() => {});
+    addTranscriptTurn("assistant", reply);
   } catch (e) {
-    warn("chat error", e);
-    appendMsg("ai", "Sorry, I couldn’t send that just now.");
-  }
-}
-
-/* ---------- Streamed webm/opus playback ---------- */
-async function playStreamedWebmOpus(response) {
-  try {
-    if (!("MediaSource" in window)) return null;
-    const ct = (response.headers.get("content-type") || "").toLowerCase();
-    if (!ct.includes("audio/webm")) return null;
-    if (!response.body || !response.body.getReader) return null;
-
-    const ms = new MediaSource();
-    const url = URL.createObjectURL(ms);
-    await new Promise((res) => ms.addEventListener("sourceopen", res, { once: true }));
-    const sb = ms.addSourceBuffer('audio/webm; codecs="opus"');
-    const reader = response.body.getReader();
-
-    const a = new Audio(url);
-    registerAudioElement(a);
-    animateRingFromElement(a, "#d4a373");
-
-    let started = false;
-
-    const pump = async () => {
-      const { value, done } = await reader.read();
-      if (done) {
-        if (!sb.updating) ms.endOfStream();
-        else
-          sb.addEventListener(
-            "updateend",
-            () => {
-              try {
-                ms.endOfStream();
-              } catch {}
-            },
-            { once: true }
-          );
-        return;
-      }
-      await new Promise((r) => {
-        const go = () => {
-          try {
-            sb.appendBuffer(value);
-          } catch {
-            r();
-            return;
-          }
-        };
-        if (!sb.updating) {
-          go();
-          r();
-        } else
-          sb.addEventListener(
-            "updateend",
-            () => {
-              go();
-              r();
-            },
-            { once: true }
-          );
-      });
-      return pump();
-    };
-
-    sb.addEventListener("updateend", () => {
-      if (!started) {
-        started = true;
-        try {
-          a.play().catch(() => {
-            a.dispatchEvent(new Event("ended"));
-          });
-        } catch {}
-      }
-    });
-
-    pump().catch(() => {
-      try {
-        ms.endOfStream();
-      } catch {}
-    });
-
-    await new Promise((r) => (a.onended = r));
-    URL.revokeObjectURL(url);
-
-    lastAIFinishedAt = Date.now();
-    if (isCalling) armIdleAfterAI();
-
-    return true;
-  } catch {
-    return null;
+    warn("sendChatToN8N failed", e);
+    if (typingBubble) {
+      typingBubble.parentElement?.classList.remove("typing");
+      typingBubble.textContent = "Network error.";
+    }
   }
 }
 
 /* ---------- Boot ---------- */
-ensureTranscriptElementsExist();
-updateMicUI();
-updateSpeakerUI();
-updateModeBtnUI();
-showCallView();
-resetCallTimer();
-setAutoScroll(true);
-prepareGreetingForNextCall();
-log("[SOW] call.js ready (Deepgram mobile fallback:", DG.enable, ")");
+(function boot() {
+  ensureTranscriptElementsExist();
+  setAutoScroll(true);
+
+  // Wire "Return to conversation" link if present
+  if (threadLink && conversationId) {
+    threadLink.style.display = "";
+  }
+
+  // Prefetch greeting immediately
+  prepareGreetingForNextCall();
+
+  // Initial UI
+  resetCallTimer();
+  updateMicUI();
+  updateSpeakerUI();
+  updateModeBtnUI();
+
+  // Debug HUD initial render
+  renderDebugHud();
+})();
+
+/* ---------- Optional: expose debug helpers ---------- */
+window.__SOW = {
+  DG,
+  stopDeepgramRecognizer,
+  startDeepgramRecognizer,
+  dgHudStatus,
+  dgHudErr,
+  dgHudMsg,
+  renderDebugHud,
+};
