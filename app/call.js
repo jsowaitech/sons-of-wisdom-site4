@@ -1,13 +1,7 @@
 // app/call.js
 // Son of Wisdom — Call mode
 // Idle-detection + system_event calls + INLINE transcript panel (no iframe)
-// - If user doesn't respond after AI finishes:
-//   1) Blake sends a nudge (system_event: no_response_nudge)
-//   2) Then Blake sends an ending line (system_event: no_response_end) and call ends
-//
-// Assumes your netlify/functions/call-coach.js supports:
-//  - system_event: "no_response_nudge" | "no_response_end"
-//  - returns JSON with assistant_text + audio_base64 (+ mime)
+// Deepgram fallback runs ONLY on mobile browsers (streaming WS)
 
 import { supabase } from "./supabase.js";
 
@@ -24,12 +18,6 @@ const HumeRealtime = window.HumeRealtime ?? {
 HumeRealtime.init?.({ enable: false });
 
 /* ---------- Supabase (OPTIONAL) ---------- */
-/**
- * In local dev you can inject:
- *   window.SUPABASE_SERVICE_ROLE_KEY = "....";
- * For production we recommend proxying through a secure backend instead of
- * exposing a service role key to the browser.
- */
 const SUPABASE_URL = "https://plrobtlpedniyvkpwdmp.supabase.co";
 const SUPABASE_SERVICE_ROLE_KEY = window.SUPABASE_SERVICE_ROLE_KEY || "";
 const HAS_SUPABASE =
@@ -50,7 +38,6 @@ const SUMMARY_TABLE = "history_summaries";
 const SUMMARY_MAX_CHARS = 380;
 
 /* ---------- n8n webhooks / Netlify endpoints ---------- */
-/** Text chat logic still uses n8n for now. */
 const N8N_WEBHOOK_URL =
   "https://jsonofwisdom.app.n8n.cloud/webhook/4877ebea-544b-42b4-96d6-df41c58d48b0";
 
@@ -76,8 +63,8 @@ const ENABLE_STREAMED_PLAYBACK = !IS_MOBILE;
 
 /**
  * ✅ Deepgram fallback runs ONLY on mobile.
- * - On desktop: use Web Speech API if available
- * - On mobile: use Deepgram WS streaming for interim/final captions
+ * - Desktop: Web Speech API if available
+ * - Mobile: Deepgram streaming websocket captions
  */
 const USE_DEEPGRAM_ON_MOBILE = IS_MOBILE;
 
@@ -86,7 +73,7 @@ const USER_ID_KEY = "sow_user_id";
 const DEVICE_ID_KEY = "sow_device_id";
 const SENTINEL_UUID = "00000000-0000-0000-0000-000000000000";
 
-/** the current call session id (used for transcript mode) */
+/** current call session id */
 let currentCallId = null;
 
 const isUuid = (v) =>
@@ -97,7 +84,7 @@ const isUuid = (v) =>
 /* ---------- Conversation thread (from ?c=...) ---------- */
 const urlParams = new URLSearchParams(window.location.search);
 const conversationId = urlParams.get("c") || null;
-let conversationTitleLocked = false; // once we set title successfully, we stop trying
+let conversationTitleLocked = false;
 
 function getOrCreateDeviceId() {
   let id = localStorage.getItem(DEVICE_ID_KEY);
@@ -139,7 +126,7 @@ const threadLink =
 const legacyTranscriptList = document.getElementById("transcript-list");
 const legacyTranscriptInterim = document.getElementById("transcript-interim");
 
-// ✅ Inline transcript panel (right-hand side, now on call.html)
+// ✅ Inline transcript panel (right-hand side)
 const transcriptListEl =
   document.getElementById("transcriptList") || legacyTranscriptList;
 const transcriptInterimEl =
@@ -148,7 +135,7 @@ const transcriptInterimEl =
 const tsClearBtn = document.getElementById("ts-clear");
 const tsAutoScrollBtn = document.getElementById("ts-autoscroll");
 
-// Chat (created lazily, but Switch-to-Chat now navigates to home.html)
+// Chat (created lazily, but Switch-to-Chat navigates to home.html)
 let chatPanel = document.getElementById("chat-panel");
 let chatLog;
 let chatForm;
@@ -158,7 +145,7 @@ let chatInput;
 let isCalling = false;
 let isRecording = false;
 let isPlayingAI = false;
-let inChatView = false; // no longer toggled by mode button, but kept for compatibility
+let inChatView = false;
 
 let callStartedAt = null;
 let callTimerInterval = null;
@@ -167,7 +154,7 @@ let globalStream = null;
 let mediaRecorder = null;
 let recordChunks = [];
 
-/* Native ASR for user live captions */
+/* Native ASR */
 const HAS_NATIVE_ASR =
   "SpeechRecognition" in window || "webkitSpeechRecognition" in window;
 let speechRecognizer = null;
@@ -181,30 +168,27 @@ let speakerMuted = false;
 
 /* Greeting prefetch state */
 let greetingReadyPromise = null;
-let greetingPayload = null; // { text/assistant_text, audio_base64, mime }
+let greetingPayload = null;
 let greetingAudioUrl = null;
 
-/* ---------- NEW: Idle detection (no response) ---------- */
+/* ---------- Idle detection (no response) ---------- */
 const NO_RESPONSE = {
-  // after AI finishes speaking, wait this long for user to speak
   FIRST_NUDGE_MS: 20_000,
-  // after the nudge is spoken, wait this long for user to speak
   END_CALL_MS: 20_000,
-  // minimum time after AI speech before any idle logic can run
   ARM_DELAY_MS: 600,
 };
 
 let idleArmed = false;
-let idleStep = 0; // 0=none, 1=nudged
+let idleStep = 0;
 let idleTimer1 = null;
 let idleTimer2 = null;
-let lastUserActivityAt = Date.now(); // updated on speech/interim/final and when capture starts
-let lastAIFinishedAt = 0; // set when AI audio finishes (or is interrupted)
+let lastUserActivityAt = Date.now();
+let lastAIFinishedAt = 0;
 let idleInFlight = false;
 
 /* ---------- INLINE TRANSCRIPT: UI + helpers ---------- */
 let autoScrollOn = true;
-let lastFinalLine = ""; // user last final dedupe
+let lastFinalLine = "";
 
 const log = (...a) => DEBUG && console.log("[SOW]", ...a);
 const warn = (...a) => DEBUG && console.warn("[SOW]", ...a);
@@ -212,7 +196,10 @@ const trimText = (s, n = 360) => (s || "").trim().slice(0, n);
 
 function nowHHMM() {
   try {
-    return new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    return new Date().toLocaleTimeString([], {
+      hour: "2-digit",
+      minute: "2-digit",
+    });
   } catch {
     return "";
   }
@@ -229,9 +216,7 @@ function scrollTranscriptToBottom() {
 
   try {
     scroller.scrollTop = scroller.scrollHeight;
-  } catch {
-    // ignore
-  }
+  } catch {}
 }
 
 function setAutoScroll(on) {
@@ -292,7 +277,7 @@ function setTranscriptInterim(_speaker, text) {
   if (t) scrollTranscriptToBottom();
 }
 
-/* ---------- NEW: Idle detection helpers ---------- */
+/* ---------- Idle helpers ---------- */
 function noteUserActivity() {
   lastUserActivityAt = Date.now();
   cancelIdleTimers();
@@ -333,6 +318,7 @@ function shouldConsiderIdle() {
   return true;
 }
 
+/* ---------- call-coach system_event helpers ---------- */
 async function callCoachSystemEvent(eventType) {
   const user_id = getUserIdForWebhook();
   const device = getOrCreateDeviceId();
@@ -344,8 +330,7 @@ async function callCoachSystemEvent(eventType) {
       localStorage.setItem("last_call_id", currentCallId);
     } catch {
       currentCallId =
-        currentCallId ||
-        `call_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+        currentCallId || `call_${Date.now()}_${Math.random().toString(36).slice(2)}`;
     }
   }
 
@@ -475,7 +460,9 @@ function updateCallTimer() {
   const elapsedSec = Math.floor((Date.now() - callStartedAt) / 1000);
   const mins = Math.floor(elapsedSec / 60);
   const secs = elapsedSec % 60;
-  callTimerEl.textContent = `${String(mins).padStart(2, "0")}:${String(secs).padStart(2, "0")}`;
+  callTimerEl.textContent = `${String(mins).padStart(2, "0")}:${String(
+    secs
+  ).padStart(2, "0")}`;
 }
 
 function startCallTimer() {
@@ -485,7 +472,7 @@ function startCallTimer() {
   callTimerInterval = setInterval(updateCallTimer, 1000);
 }
 
-/* Derive a short conversation title from first user utterance */
+/* ---------- Conversation title helper ---------- */
 function deriveTitleFromText(raw) {
   let t = (raw || "").replace(/\s+/g, " ").trim();
   if (!t) return null;
@@ -650,7 +637,7 @@ function buildRollingSummary(prevSummary, pairs, newest, maxChars = SUMMARY_MAX_
   return summary.length ? summary : sentences.join(" ").slice(-maxChars);
 }
 
-/* ---------- UI: Chat (still wired for n8n, but Switch-to-Chat now navigates) ---------- */
+/* ---------- UI: Chat (still wired for n8n) ---------- */
 function ensureChatUI() {
   if (!chatPanel) {
     chatPanel = document.createElement("div");
@@ -721,7 +708,7 @@ async function typewriter(el, full, delay = 24) {
   }
 }
 
-/* transcript helpers (inline panel) */
+/* transcript helpers */
 const transcriptUI = {
   clearAll() {
     if (transcriptInterimEl) transcriptInterimEl.textContent = "";
@@ -734,7 +721,6 @@ const transcriptUI = {
     if (legacyTranscriptList && legacyTranscriptList !== transcriptListEl) {
       legacyTranscriptList.innerHTML = "";
     }
-
     scrollTranscriptToBottom();
   },
 
@@ -866,7 +852,7 @@ function animateRingFromElement(mediaEl, color = "#d4a373") {
   if (!mediaEl.paused && !mediaEl.ended) start();
 }
 
-/* ---------- VAD (endless recording; stop after silence) ---------- */
+/* ---------- VAD ---------- */
 const VAD = {
   SILENCE_THRESHOLD: 5,
   SILENCE_TIMEOUT_MS: 3000,
@@ -960,8 +946,8 @@ const DG = {
   smart_format: true,
   punctuate: true,
   interim_results: true,
-  vad_events: false,
-  endpointing: 50, // ms - helps finalize (optional)
+  vad_events: true,
+  endpointing: 50,
   sample_rate: 16000,
 };
 
@@ -969,11 +955,10 @@ let dgSocket = null;
 let dgCtx = null;
 let dgSource = null;
 let dgProcessor = null;
-let dgInputSampleRate = 48000; // replaced at runtime
+let dgInputSampleRate = 48000;
 let dgInterim = "";
 
-// Minimal downsampler Float32 -> Int16 PCM (little-endian)
-function downsampleTo16k(float32, inSampleRate, outSampleRate = 16000) {
+function downsampleTo(float32, inSampleRate, outSampleRate) {
   if (outSampleRate === inSampleRate) return float32;
 
   const ratio = inSampleRate / outSampleRate;
@@ -982,7 +967,6 @@ function downsampleTo16k(float32, inSampleRate, outSampleRate = 16000) {
 
   let offsetResult = 0;
   let offsetBuffer = 0;
-
   while (offsetResult < result.length) {
     const nextOffsetBuffer = Math.round((offsetResult + 1) * ratio);
     let accum = 0;
@@ -1010,7 +994,8 @@ function floatTo16BitPCM(float32) {
 }
 
 async function fetchDeepgramToken() {
-  const resp = await fetch(`${DEEPGRAM_TOKEN_ENDPOINT}?ttl=60`, { method: "GET" });
+  // ✅ long enough for real calls (15 minutes)
+  const resp = await fetch(`${DEEPGRAM_TOKEN_ENDPOINT}?ttl=900`, { method: "GET" });
   if (!resp.ok) {
     const t = await resp.text().catch(() => "");
     throw new Error(`Deepgram token HTTP ${resp.status}: ${t || resp.statusText}`);
@@ -1020,21 +1005,18 @@ async function fetchDeepgramToken() {
   return data.access_token;
 }
 
-function buildDeepgramWsUrl(token) {
+function buildDeepgramWsUrl() {
   const u = new URL(DG.endpoint);
   u.searchParams.set("model", DG.model);
   u.searchParams.set("language", DG.language);
   u.searchParams.set("smart_format", String(!!DG.smart_format));
   u.searchParams.set("punctuate", String(!!DG.punctuate));
   u.searchParams.set("interim_results", String(!!DG.interim_results));
+  u.searchParams.set("vad_events", String(!!DG.vad_events));
   u.searchParams.set("endpointing", String(DG.endpointing));
   u.searchParams.set("encoding", "linear16");
   u.searchParams.set("sample_rate", String(DG.sample_rate));
   u.searchParams.set("channels", "1");
-
-  // ✅ Deepgram supports passing temporary token as query param for browser WS
-  u.searchParams.set("token", token);
-
   return u.toString();
 }
 
@@ -1055,6 +1037,7 @@ function stopDeepgramRecognizer() {
     try { dgSocket.close(); } catch {}
   }
   dgSocket = null;
+
   dgInterim = "";
 }
 
@@ -1070,11 +1053,12 @@ async function startDeepgramRecognizer(stream) {
     return false;
   }
 
-  const wsUrl = buildDeepgramWsUrl(token);
+  const wsUrl = buildDeepgramWsUrl();
 
   let socket;
   try {
-    socket = new WebSocket(wsUrl);
+    // ✅ Auth via subprotocol (reliable in browsers)
+    socket = new WebSocket(wsUrl, ["token", token]);
   } catch (e) {
     warn("Deepgram WebSocket create failed:", e);
     return false;
@@ -1082,17 +1066,9 @@ async function startDeepgramRecognizer(stream) {
 
   dgSocket = socket;
 
-  socket.onopen = () => {
-    log("[SOW] Deepgram WS open");
-  };
-
-  socket.onerror = (e) => {
-    warn("[SOW] Deepgram WS error", e);
-  };
-
-  socket.onclose = () => {
-    log("[SOW] Deepgram WS closed");
-  };
+  socket.onopen = () => log("[SOW] Deepgram WS open");
+  socket.onerror = (e) => warn("[SOW] Deepgram WS error", e);
+  socket.onclose = () => log("[SOW] Deepgram WS closed");
 
   socket.onmessage = (evt) => {
     try {
@@ -1102,48 +1078,47 @@ async function startDeepgramRecognizer(stream) {
       const isFinal = !!msg?.is_final;
 
       if (!transcript) {
-        // clear interim when final with empty, or keep quiet
         if (isFinal) transcriptUI.setInterim("");
         return;
       }
 
       if (isFinal) {
         transcriptUI.addFinalLine(transcript);
+
+        // ✅ CRITICAL for your pipeline:
+        // uploadRecordingAndNotify() uses finalSegments to create user_turn
+        finalSegments.push(transcript);
+
         dgInterim = "";
       } else {
         dgInterim = transcript;
         transcriptUI.setInterim(dgInterim);
+        noteUserActivity();
       }
     } catch {
-      // ignore non-JSON frames
+      // ignore
     }
   };
 
-  // audio graph: stream -> AudioContext -> ScriptProcessor -> PCM16 -> WS
   dgCtx = new (window.AudioContext || window.webkitAudioContext)();
   if (dgCtx.state === "suspended") dgCtx.resume().catch(() => {});
   dgInputSampleRate = dgCtx.sampleRate || 48000;
 
   dgSource = dgCtx.createMediaStreamSource(stream);
 
-  // ScriptProcessor is deprecated but still widely supported (including Safari)
   const bufferSize = 4096;
   dgProcessor = dgCtx.createScriptProcessor(bufferSize, 1, 1);
   dgSource.connect(dgProcessor);
-  dgProcessor.connect(dgCtx.destination); // required in some browsers to keep it alive
+  dgProcessor.connect(dgCtx.destination);
 
   dgProcessor.onaudioprocess = (e) => {
     if (!dgSocket || dgSocket.readyState !== WebSocket.OPEN) return;
     try {
       const input = e.inputBuffer.getChannelData(0);
-      const down = downsampleTo16k(input, dgInputSampleRate, DG.sample_rate);
+      const down = downsampleTo(input, dgInputSampleRate, DG.sample_rate);
       const pcm16 = floatTo16BitPCM(down);
       dgSocket.send(pcm16);
-      // speaking implies activity
-      noteUserActivity();
-    } catch {
-      // ignore
-    }
+    } catch {}
   };
 
   return true;
@@ -1259,14 +1234,8 @@ document.addEventListener("keydown", (e) => {
   }
 });
 
-/* Inline transcript panel controls */
-tsClearBtn?.addEventListener("click", () => {
-  transcriptUI.clearAll();
-});
-
-tsAutoScrollBtn?.addEventListener("click", () => {
-  setAutoScroll(!autoScrollOn);
-});
+tsClearBtn?.addEventListener("click", () => transcriptUI.clearAll());
+tsAutoScrollBtn?.addEventListener("click", () => setAutoScroll(!autoScrollOn));
 
 /* ---------- Greeting (ALWAYS transcribable) ---------- */
 async function fetchGreetingJSON() {
@@ -1366,8 +1335,7 @@ async function startCall() {
     if (!isCalling) return;
 
     if (!greetingOk) {
-      statusText.textContent =
-        "Greeting failed. Please tap Call again in a moment.";
+      statusText.textContent = "Greeting failed. Please tap Call again.";
       endCall();
       return;
     }
@@ -1440,7 +1408,7 @@ function endCall() {
   }
 }
 
-/* Small one-shot clips (ring/greeting/others) */
+/* Small one-shot clips */
 function safePlayOnce(src, { limitMs = 15000, color = "#d4a373" } = {}) {
   return new Promise((res) => {
     const a = new Audio(src);
@@ -1483,9 +1451,7 @@ async function startRecordingLoop() {
     if (!ok) continue;
     const played = await uploadRecordingAndNotify();
     if (!isCalling) break;
-    statusText.textContent = played
-      ? "Your turn – I’m listening…"
-      : "Listening again…";
+    statusText.textContent = played ? "Your turn – I’m listening…" : "Listening again…";
   }
 }
 
@@ -1504,12 +1470,8 @@ function commitInterimToFinal() {
 }
 
 function openNativeRecognizer() {
-  // If Deepgram is enabled (mobile-only), prefer it over WebSpeech
-  if (DG.enable) {
-    log("[SOW] Mobile detected: using Deepgram for live transcription");
-    // Deepgram start happens in captureOneTurn (after we have stream)
-    return;
-  }
+  // Mobile uses Deepgram; skip WebSpeech
+  if (DG.enable) return;
 
   const ASR = window.SpeechRecognition || window.webkitSpeechRecognition;
 
@@ -1534,7 +1496,6 @@ function openNativeRecognizer() {
       if (!txt) continue;
 
       if (res.isFinal) {
-        log("ASR final:", txt);
         transcriptUI.addFinalLine(txt);
         finalSegments.push(txt);
         interimBuffer = "";
@@ -1555,24 +1516,12 @@ function openNativeRecognizer() {
   };
 
   r.onend = () => {
-    log("ASR onend; isCalling=", isCalling, "isRecording=", isRecording);
     if (isCalling && isRecording) {
-      try {
-        r.start();
-        log("ASR restarted");
-      } catch (err) {
-        warn("ASR restart failed:", err);
-      }
+      try { r.start(); } catch {}
     }
   };
 
-  try {
-    r.start();
-    log("ASR start() called");
-  } catch (err) {
-    warn("ASR start() threw immediately:", err);
-  }
-
+  try { r.start(); } catch {}
   speechRecognizer = r;
 }
 
@@ -1593,7 +1542,6 @@ async function captureOneTurn() {
   if (!isCalling || isRecording || isPlayingAI) return false;
 
   statusText.textContent = "Your turn – I’m listening…";
-
   finalSegments = [];
   interimBuffer = "";
   transcriptUI.setInterim("Listening…");
@@ -1606,10 +1554,12 @@ async function captureOneTurn() {
         autoGainControl: true,
       },
     });
+
     if (!isCalling) {
       stream.getTracks().forEach((t) => t.stop());
       return false;
     }
+
     globalStream = stream;
     updateMicTracks();
 
@@ -1656,8 +1606,11 @@ async function captureOneTurn() {
     // Start captions:
     openNativeRecognizer();
     if (DG.enable) {
-      // Deepgram mobile captions start here (requires stream)
-      startDeepgramRecognizer(stream).catch((e) => warn("Deepgram start failed", e));
+      const ok = await startDeepgramRecognizer(stream).catch((e) => {
+        warn("Deepgram start failed", e);
+        return false;
+      });
+      if (!ok) warn("[SOW] Deepgram did not start; no mobile captions.");
     }
 
     HumeRealtime.startTurn?.(stream, vadCtx);
@@ -1679,6 +1632,10 @@ async function captureOneTurn() {
     return false;
   }
 }
+
+/* ====== PART 1 ENDS HERE ====== */
+/* Paste PART 2 immediately after this line */
+/* ====== CALL.JS — PART 2/2 ====== */
 
 /* ---------- BARGE-IN (interrupt during AI playback) ---------- */
 const BARGE = {
@@ -1753,7 +1710,9 @@ function startBargeInMonitor(onInterrupt) {
       if (rms > BARGE.rmsThresh) {
         hold += 16;
         if (hold >= BARGE.holdMs) {
-          try { onInterrupt?.(); } catch {}
+          try {
+            onInterrupt?.();
+          } catch {}
           stopBargeInMonitor();
           return;
         }
@@ -1775,12 +1734,14 @@ function stopBargeInMonitor() {
     bargeAnalyser?.disconnect();
   } catch {}
   if (bargeCtx && bargeCtx.state !== "closed") {
-    try { bargeCtx.close(); } catch {}
+    try {
+      bargeCtx.close();
+    } catch {}
   }
   bargeCtx = bargeSrc = bargeAnalyser = null;
 }
 
-/* Unified AI playback that supports barge-in and optional live transcription */
+/* Unified AI playback */
 async function playAIWithBargeIn(
   playableUrl,
   { aiBlob = null, aiBubbleEl = null } = {}
@@ -1795,8 +1756,7 @@ async function playAIWithBargeIn(
     registerAudioElement(a);
     animateRingFromElement(a, "#d4a373");
 
-    if (!aiBubbleEl && inChatView)
-      aiBubbleEl = appendMsg("ai", "", { typing: true });
+    if (!aiBubbleEl && inChatView) aiBubbleEl = appendMsg("ai", "", { typing: true });
 
     if (aiBlob && N8N_TRANSCRIBE_URL) {
       try {
@@ -1831,7 +1791,9 @@ async function playAIWithBargeIn(
     if (okMic) {
       startBargeInMonitor(() => {
         interrupted = true;
-        try { a.pause(); } catch {}
+        try {
+          a.pause();
+        } catch {}
         statusText.textContent = "Go ahead…";
         noteUserActivity();
         finish("barge");
@@ -1875,18 +1837,17 @@ async function uploadRecordingAndNotify() {
 
   if (!currentCallId) {
     try {
-      currentCallId =
-        localStorage.getItem("last_call_id") || crypto.randomUUID();
+      currentCallId = localStorage.getItem("last_call_id") || crypto.randomUUID();
       localStorage.setItem("last_call_id", currentCallId);
     } catch {
       currentCallId =
-        currentCallId ||
-        `call_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+        currentCallId || `call_${Date.now()}_${Math.random().toString(36).slice(2)}`;
     }
   }
 
   const mimeType = mediaRecorder?.mimeType || "audio/webm";
   const blob = new Blob(recordChunks, { type: mimeType });
+
   if (!blob.size || !isCalling) {
     statusText.textContent = "I didn’t catch any audio. Let’s try again.";
     return false;
@@ -1903,11 +1864,7 @@ async function uploadRecordingAndNotify() {
   } catch {}
 
   const prevSummary = await fetchRollingSummary(user_id, device);
-  const rollingSummary = buildRollingSummary(
-    prevSummary,
-    historyPairs,
-    combinedTranscript
-  );
+  const rollingSummary = buildRollingSummary(prevSummary, historyPairs, combinedTranscript);
 
   const transcriptForModel = historyPairsText
     ? `Previous conversation (last ${Math.min(historyPairs.length, 8)} pairs), oldest→newest:\n${historyPairsText}\n\nUser now says:\n${combinedTranscript}`
@@ -1970,11 +1927,7 @@ async function uploadRecordingAndNotify() {
 
     const ct = (resp.headers.get("content-type") || "").toLowerCase();
 
-    if (
-      ENABLE_STREAMED_PLAYBACK &&
-      ct.includes("audio/webm") &&
-      resp.body?.getReader
-    ) {
+    if (ENABLE_STREAMED_PLAYBACK && ct.includes("audio/webm") && resp.body?.getReader) {
       const ok = await playStreamedWebmOpus(resp.clone());
       if (ok) {
         upsertRollingSummary(user_id, device, rollingSummary).catch(() => {});
@@ -2000,11 +1953,7 @@ async function uploadRecordingAndNotify() {
         .trim();
 
       const b64 = data?.audio_base64;
-      const url =
-        data?.result_audio_url ||
-        data?.audioUrl ||
-        data?.url ||
-        data?.fileUrl;
+      const url = data?.result_audio_url || data?.audioUrl || data?.url || data?.fileUrl;
 
       if (b64 && !url) {
         const raw = b64.includes(",") ? b64.split(",").pop() : b64;
@@ -2049,7 +1998,9 @@ async function uploadRecordingAndNotify() {
   });
 
   if (revokeLater) {
-    try { URL.revokeObjectURL(revokeLater); } catch {}
+    try {
+      URL.revokeObjectURL(revokeLater);
+    } catch {}
   }
 
   upsertRollingSummary(user_id, device, rollingSummary).catch(() => {});
@@ -2111,9 +2062,7 @@ async function liveTranscribeBlob(blob, aiBubbleEl) {
     });
     const data = await resp.json().catch(() => null);
     const text = data?.text || data?.transcript || "";
-    if (text && aiBubbleEl) {
-      await typewriter(aiBubbleEl, text, 18);
-    }
+    if (text && aiBubbleEl) await typewriter(aiBubbleEl, text, 18);
     if (text) {
       addTranscriptTurn("assistant", text);
       setTranscriptInterim("assistant", "");
@@ -2178,11 +2127,7 @@ async function sendChatToN8N(userText) {
     if (ct.includes("application/json")) {
       const data = await resp.json();
       aiText = data?.text ?? data?.transcript ?? data?.message ?? "";
-      const url =
-        data?.result_audio_url ||
-        data?.audioUrl ||
-        data?.url ||
-        data?.fileUrl;
+      const url = data?.result_audio_url || data?.audioUrl || data?.url || data?.fileUrl;
       const b64 = data?.audio_base64;
       if (b64 && !url) {
         const raw = b64.includes(",") ? b64.split(",").pop() : b64;
@@ -2219,7 +2164,9 @@ async function sendChatToN8N(userText) {
         aiBubbleEl: aiBubble,
       });
       if (revoke) {
-        try { URL.revokeObjectURL(revoke); } catch {}
+        try {
+          URL.revokeObjectURL(revoke);
+        } catch {}
       }
     }
 
@@ -2240,14 +2187,14 @@ async function playStreamedWebmOpus(response) {
 
     const ms = new MediaSource();
     const url = URL.createObjectURL(ms);
-    await new Promise((res) =>
-      ms.addEventListener("sourceopen", res, { once: true })
-    );
+    await new Promise((res) => ms.addEventListener("sourceopen", res, { once: true }));
     const sb = ms.addSourceBuffer('audio/webm; codecs="opus"');
     const reader = response.body.getReader();
+
     const a = new Audio(url);
     registerAudioElement(a);
     animateRingFromElement(a, "#d4a373");
+
     let started = false;
 
     const pump = async () => {
@@ -2258,7 +2205,9 @@ async function playStreamedWebmOpus(response) {
           sb.addEventListener(
             "updateend",
             () => {
-              try { ms.endOfStream(); } catch {}
+              try {
+                ms.endOfStream();
+              } catch {}
             },
             { once: true }
           );
@@ -2266,7 +2215,12 @@ async function playStreamedWebmOpus(response) {
       }
       await new Promise((r) => {
         const go = () => {
-          try { sb.appendBuffer(value); } catch { r(); return; }
+          try {
+            sb.appendBuffer(value);
+          } catch {
+            r();
+            return;
+          }
         };
         if (!sb.updating) {
           go();
@@ -2296,7 +2250,9 @@ async function playStreamedWebmOpus(response) {
     });
 
     pump().catch(() => {
-      try { ms.endOfStream(); } catch {}
+      try {
+        ms.endOfStream();
+      } catch {}
     });
 
     await new Promise((r) => (a.onended = r));

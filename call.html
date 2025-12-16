@@ -4,6 +4,12 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Son of Wisdom — Call</title>
+
+  <!-- iOS/Safari + mobile niceties -->
+  <meta name="theme-color" content="#0b0f14" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+
   <link rel="stylesheet" href="style.css" />
 </head>
 
@@ -25,13 +31,13 @@
       powered by <span class="brand-mini">Son of Wisdom</span>
     </div>
 
-    <!-- This gets wired by call.js once we know conversationId -->
+    <!-- optional: can be shown by JS later -->
     <a id="thread-link" class="btn small" href="#" style="display:none;">
       Return to conversation
     </a>
   </header>
 
-  <!-- Main content: call card + right-hand transcript panel -->
+  <!-- Main content -->
   <main class="content call-layout" role="main">
     <!-- Left: call card -->
     <section class="call-main">
@@ -56,7 +62,7 @@
           </div>
           <div class="call-timer" id="call-timer">00:00</div>
 
-          <!-- Hidden obsolete transcript (kept for compatibility if you still reference it) -->
+          <!-- Legacy hidden transcript (kept for compatibility) -->
           <div id="transcript" class="call-transcript" style="display:none;">
             <div id="transcript-list" class="transcript-list"></div>
             <div id="transcript-interim" class="transcript-interim"></div>
@@ -113,7 +119,7 @@
       </section>
     </section>
 
-    <!-- Right-hand live transcript panel (DIRECT, NO IFRAME) -->
+    <!-- Right: live transcript panel -->
     <aside class="call-side-transcript" aria-label="Live transcription">
       <div class="transcript-wrap" style="height:100%;min-height:0;">
         <div class="ts-header" style="padding-bottom:0.45rem;">
@@ -136,6 +142,7 @@
         </div>
 
         <div id="tsList" class="ts-list" style="flex:1;min-height:0;">
+          <!-- IMPORTANT: ids must match call.js -->
           <div id="transcriptList" class="transcript-list"></div>
           <div id="transcriptInterim" class="transcript-interim"></div>
         </div>
@@ -164,7 +171,6 @@
     const params = new URLSearchParams(window.location.search);
     const conversationId = params.get("c");
 
-    // Preserve conversation when leaving call mode
     const backBtn = document.getElementById("btn-back-home");
     if (backBtn) {
       backBtn.addEventListener("click", (e) => {
@@ -174,9 +180,18 @@
         window.location.replace(url.toString());
       });
     }
+
+    // Optional: show "Return to conversation" link if we have c=...
+    const threadLink = document.getElementById("thread-link");
+    if (threadLink && conversationId) {
+      const url = new URL("home.html", window.location.origin);
+      url.searchParams.set("c", conversationId);
+      threadLink.href = url.toString();
+      threadLink.style.display = "inline-flex";
+    }
   </script>
 
-  <!-- App logic -->
+  <!-- App logic (module) -->
   <script type="module" src="app/call.js"></script>
 </body>
 </html>

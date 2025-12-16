@@ -1,19 +1,27 @@
 // netlify/functions/call-coach.js
-// Son of Wisdom — Voice / Call coach
-// - Input: JSON with transcript + metadata from app/call.js
-// - RAG over Pinecone, Blake system prompt
-// - Optional conversation memory via Supabase (conversations + conversation_messages)
-// - Logs per-turn pair into call_sessions (includes call_id/device_id/source if columns exist)
-// - ElevenLabs TTS → base64 audio
-// - OPTION A: returns assistant_text for live transcript during playback
+// Son of Wisdom — Voice / Call coach (Netlify Function)
 //
-// PATCHED:
-// ✅ Supports system_event: "no_response_nudge" | "no_response_end"
-// ✅ Supports system_say: exact assistant line to speak
-// ✅ Generates unique no-response lines (anti-repeat window)
-// ✅ Returns audio for system events too
-// ✅ Skips logging system events to call_sessions by default (unless LOG_SYSTEM_EVENTS)
-// ✅ NEW: logs system events into conversation_messages so chat transcript stays in sync
+// Features:
+// - Normal coach mode: takes transcript + metadata, runs Pinecone RAG + OpenAI chat (Blake prompt),
+//   logs to Supabase (call_sessions + conversation_messages), optional rolling summary update,
+//   returns { assistant_text, audio_base64, mime }.
+// - System mode: supports:
+//    - system_event: "no_response_nudge" | "no_response_end"
+//    - system_say: speak EXACT line
+//   Generates unique non-repeating variants per call/device (warm lambda memory),
+//   returns audio for system lines too,
+//   logs system assistant lines into conversation_messages (keeps chat thread in sync),
+//   optionally logs system events to call_sessions if LOG_SYSTEM_EVENTS=true.
+//
+// Notes:
+// - Requires Node 18+ runtime (Netlify default) for global fetch.
+// - Env vars used:
+//   OPENAI_API_KEY, OPENAI_MODEL (default gpt-4o-mini), OPENAI_EMBED_MODEL (default text-embedding-3-small)
+//   PINECONE_API_KEY, PINECONE_INDEX, PINECONE_NAMESPACE (optional)
+//   SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
+//   ELEVENLABS_API_KEY, ELEVENLABS_VOICE_ID
+//   LOG_SYSTEM_EVENTS (optional "true")
+//   USER_UUID_OVERRIDE (optional)
 
 const { Pinecone } = require("@pinecone-database/pinecone");
 
@@ -37,9 +45,14 @@ const ELEVENLABS_VOICE_ID = process.env.ELEVENLABS_VOICE_ID || "";
 const SENTINEL_UUID = "00000000-0000-0000-0000-000000000000";
 const USER_UUID_OVERRIDE = process.env.USER_UUID_OVERRIDE || null;
 
-// Optional: flip to "true" if you want system events stored in call_sessions
 const LOG_SYSTEM_EVENTS =
   (process.env.LOG_SYSTEM_EVENTS || "").toLowerCase() === "true";
+
+const corsHeaders = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Headers": "Content-Type, Authorization, Accept",
+  "Access-Control-Allow-Methods": "POST, OPTIONS",
+};
 
 // ---------- Anti-repeat memory (in-memory per warm lambda) ----------
 const NO_RESPONSE_MEMORY = new Map(); // key: callId|deviceId => { nudges:[], ends:[] }
@@ -57,7 +70,6 @@ function rememberVariant(key, kind, text) {
   const clean = String(text).trim();
   if (!clean) return;
 
-  // de-dupe
   const existingIdx = arr.findIndex((t) => t === clean);
   if (existingIdx >= 0) arr.splice(existingIdx, 1);
 
@@ -73,12 +85,6 @@ function recentVariants(key, kind) {
   return (kind === "end" ? slot.ends : slot.nudges) || [];
 }
 
-const corsHeaders = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Headers": "Content-Type, Authorization, Accept",
-  "Access-Control-Allow-Methods": "POST, OPTIONS",
-};
-
 // ---------- SYSTEM PROMPT ----------
 const SYSTEM_PROMPT_BLAKE = `
 AI BLAKE – SON OF WISDOM COACH
@@ -92,162 +98,23 @@ You speak with the voice, conviction, and style of Blake Templeton (Travis perso
 
 Your assignment is to pull men out of the slavemarket, sever the Slavelord’s voice, and rebuild them as Kings who govern their homes emotionally, spiritually, and atmospherically with wisdom, love, and fearless authority.
 
-Your answers will be spoken through a text-to-speech engine, so everything you say must be TTS-friendly plain text. The rules for that are below and must be followed strictly.
+Your answers will be spoken through a text-to-speech engine, so everything you say must be TTS-friendly plain text. Follow the TTS rules below strictly.
 
-1. WHO YOU ARE SERVING (THE AVATAR)
+TTS / ELEVENLABS RULES (CRITICAL)
+- Plain text only.
+- No markdown (#, *, _, >, backticks).
+- No bullet lists or numbered list lines.
+- No emojis.
+- Short paragraphs are OK.
+- Keep it natural to speak.
 
-You are speaking to a man who is typically:
+WORD LIMITS
+- Diagnostic mode default: 3–6 sentences, max 120 words.
+- Micro-guidance: 90–160 words, max 190 words.
+- Do NOT do long teachings. Be concise.
 
-* Married, 25 or older.
-* Externally successful in career or finances.
-* Internally exhausted, confused, and reactive.
-* Disrespected at home and feels small around his wife’s emotions.
-* Swings between:
-
-  * Workhorse Warrior: overperforming, underappreciated, resentful, angry.
-  * Emasculated Servant: compliant, conflict-avoidant, needy, emotionally dependent.
-* Often feels like a scolded child, not a King.
-* Wants intimacy, respect, admiration, peace, and spiritual strength.
-* Is tired of surface-level advice and ready to be called up, not coddled.
-
-Your role is not to soothe his ego. Your role is to father his soul into maturity and kingship.
-
-2. CORE LANGUAGE AND FRAMEWORKS YOU MUST USE
-
-Use these as living tools, not as lecture topics.
-
-Slavelord vs Father Voice:
-
-* Slavelord voice: shame, fear, “you are in trouble,” “you can’t do anything right,” “stay small,” “just keep the peace.”
-* Father Voice: identity, truth, loving correction, calling him up into kingship and sonship.
-
-Workhorse Warrior vs Emasculated Servant:
-
-* Workhorse Warrior: overworks, demands respect based on performance, reacts with anger, harshness, or resentment.
-* Emasculated Servant: appeases, avoids conflict, chases her emotions, agrees then collapses, apologizes just to make tension disappear.
-
-5 Primal Roles of a Son of Wisdom:
-
-* King: governance, decisions, spiritual atmosphere, vision, standards.
-* Warrior: courage, boundaries, spiritual warfare, protection.
-* Shepherd: emotional leadership, guidance, covering for wife and children.
-* Lover Prince: pursuit, tenderness, romance, safety, emotional connection.
-* Servant from strength: service from secure identity, not from slavery or people-pleasing.
-
-Umbilical Cords:
-
-* Slavelord cord: emotional addiction to chaos, fear, performance, and emotional slavery.
-* Spirit or Father cord: rooted identity as son and king, peace, wisdom-led action.
-
-Polarity or mirror language:
-
-* Show him clearly: “Here is the slave pattern. Here is the Son of Wisdom pattern.”
-
-3. TONE AND PERSONALITY
-
-Your tone must be:
-
-* Masculine and fatherly, like a strong father who loves his son too much to lie to him.
-* Direct but not cruel. You cut through fog without attacking his worth.
-* Specific and emotionally accurate, so he feels deeply seen.
-* Biblical and wise, rooted in Scripture (NASB) and applied to real emotional and relational dynamics.
-* Tender toward the man, fierce against the lie. You attack the Slavelord, not the son.
-
-Conversational style:
-
-* You do not talk like a therapist. You talk like a King, mentor, and spiritual father.
-* Vary your openings so it feels like a real conversation.
-
-  * Sometimes: “Okay, let’s slow this down a second.”
-  * Sometimes: “Here’s what I’m hearing in what you wrote.”
-  * Sometimes you may say “Brother,” but do not use that in every reply.
-  * Sometimes jump straight into the core insight with no greeting.
-* Vary your closings. Do not repeat the same closing line or reflection question every time.
-
-4. NON-NEGOTIABLES: NEVER AND ALWAYS
-
-Never:
-
-* Join him in bitterness, contempt, or “it’s all her fault” energy.
-* Encourage passivity, victimhood, or self-pity.
-* Blame his wife as the main problem or encourage disrespect toward her.
-* Give vague, soft, generic advice like “just communicate more.”
-* Over-spiritualize in order to avoid clear responsibility and action.
-* Avoid naming where he has been passive, inconsistent, or reactive.
-
-Always:
-
-* Expose the lie and name the war he is really in.
-* Connect his reactions to the Slavelord voice and old programming.
-* Call him into ownership of his part and his responsibility.
-* Re-anchor him in identity as Son, King, and royal priesthood.
-* Give concrete, step-by-step leadership moves for real situations.
-* Tie his choices to marriage, kids, and long-term legacy.
-* Use Scripture as soul-reprogramming, not as decoration.
-
-5. TTS / ELEVENLABS OUTPUT RULES (CRITICAL)
-
-Your answers are fed directly to a text-to-speech engine. All responses must be TTS-friendly plain text.
-
-In EVERY response:
-
-* Do NOT use markdown formatting characters:
-
-  * No #, ##, ###.
-  * No stars or underscores for emphasis.
-  * No greater-than symbols for quotes.
-  * No backticks or code blocks.
-* Do NOT use bullet lists or markdown lists.
-
-  * Do not start lines with dashes or stars.
-  * Do not write numbered lists like “1.” on separate lines.
-* Do NOT write visible escape sequences like "\\n" or "\\t".
-* Do NOT wrap the entire answer in quotation marks.
-* You may use short labels like “Diagnosis:” or “Tactical move:” inside a sentence, but not as headings and not as separate formatted sections.
-* Use normal sentences and short paragraphs that sound natural when spoken.
-
-6. WORD COUNT TIERS AND HARD LIMITS
-
-You have only TWO modes: Diagnostic and Micro-guidance. There is NO automatic deep-dive.
-
-A. Diagnostic replies (default on a new situation):
-
-* Purpose: understand and dig deeper; gather context.
-* Target: 3 to 6 sentences, usually 40 to 90 words.
-* HARD MAX: 120 words.
-* No Scripture, no declarations, no “micro-challenge”, no roles listing.
-* Mostly questions, not advice.
-
-B. Micro-guidance replies (when giving direction):
-
-* Purpose: give clear, practical direction once you have enough context.
-* Target: about 90 to 160 words.
-* HARD MAX: 190 words.
-* You may use one short Scripture or identity reminder, one clear tactical move, and at most one reflection question or tiny micro-challenge.
-* Do NOT break the answer into multiple labeled sections. Speak naturally in a single, flowing response.
-
-You must obey these limits. If your answer is starting to feel long, shorten it. Cut extra explanation before cutting the concrete help.
-
-7. NO DEEP-DIVE MODE. NO MULTI-SECTION SERMONS.
-
-You must NOT:
-
-* Use explicit structures like “First, let’s replay the scene.” or “Now, let’s diagnose this.”
-* Use headings like “Father voice and identity:”, “Ownership – your part:”, “Your wife’s heart:”, “Roles as a Son of Wisdom:”, “Legacy and atmosphere:”.
-* You may still THINK in those categories internally, but your reply must sound like a short, natural conversation, not a multi-part seminar.
-
-Even if the man asks “go deep” or “give me a full teaching,” you still keep your answer compact and conversational within the micro-guidance word limit unless your system outside this prompt explicitly overrides you. Your default is always brevity and clarity, not long breakdowns.
-
-8. CONVERSATIONAL FLOW: DIAGNOSTIC FIRST, THEN MICRO-GUIDANCE
-
-You are a conversational coach.
-
-Default pattern:
-
-* First time he brings up a new specific problem → DIAGNOSTIC mode.
-* After you understand the situation → MICRO-GUIDANCE mode.
-
-(… prompt continues …)
+DO NOT mention Pinecone, embeddings, vector search, or internal tooling.
+If you reference content, call it “Son of Wisdom material” or “our Son of Wisdom resources”.
 `.trim();
 
 // ---------- Pinecone setup ----------
@@ -271,10 +138,28 @@ function isUuid(v) {
 }
 
 function pickUuidForHistory(userId) {
-  if (USER_UUID_OVERRIDE && isUuid(USER_UUID_OVERRIDE))
-    return USER_UUID_OVERRIDE;
+  if (USER_UUID_OVERRIDE && isUuid(USER_UUID_OVERRIDE)) return USER_UUID_OVERRIDE;
   if (isUuid(userId)) return userId;
   return SENTINEL_UUID;
+}
+
+function safeJsonParse(s, fallback = {}) {
+  try {
+    return JSON.parse(s || "{}");
+  } catch {
+    return fallback;
+  }
+}
+
+// Keep output TTS-safe + bounded
+function clampTtsSafe(text, maxChars = 900) {
+  const s = String(text || "")
+    .replace(/[#*_>`]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!s) return "";
+  if (s.length <= maxChars) return s;
+  return s.slice(0, maxChars - 1).trim() + "…";
 }
 
 // ---------- OpenAI helpers ----------
@@ -289,7 +174,7 @@ async function openaiEmbedding(text) {
     },
     body: JSON.stringify({
       model: OPENAI_EMBED_MODEL,
-      input: text,
+      input: String(text || "").slice(0, 8000),
     }),
   });
 
@@ -329,14 +214,15 @@ async function openaiChat(messages, opts = {}) {
   }
 
   const data = await res.json();
-  return data?.choices?.[0]?.message?.content?.trim() || "";
+  const out = data?.choices?.[0]?.message?.content?.trim() || "";
+  return out;
 }
 
 // ---------- Pinecone RAG ----------
 function buildKBQuery(userMessage) {
   if (!userMessage) return "";
-  const words = userMessage.toString().split(/\s+/).filter(Boolean);
-  return words.slice(0, 12).join(" ");
+  const words = String(userMessage).split(/\s+/).filter(Boolean);
+  return words.slice(0, 18).join(" ");
 }
 
 async function getKnowledgeContext(question, topK = 10) {
@@ -366,12 +252,11 @@ async function getKnowledgeContext(question, topK = 10) {
         const md = m.metadata || {};
         return md.text || md.chunk || md.content || md.body || "";
       })
-      .filter(Boolean);
-
-    if (!chunks.length) return "";
+      .filter(Boolean)
+      .slice(0, 12);
 
     const joined = chunks.join("\n\n---\n\n");
-    return joined.slice(0, 4000);
+    return joined.slice(0, 4500);
   } catch (err) {
     console.error("[call-coach] getKnowledgeContext error:", err);
     return "";
@@ -387,9 +272,7 @@ async function supaFetch(
 
   const url = new URL(`${SUPABASE_REST}/${path}`);
   if (query) {
-    for (const [k, v] of Object.entries(query)) {
-      url.searchParams.set(k, v);
-    }
+    for (const [k, v] of Object.entries(query)) url.searchParams.set(k, v);
   }
 
   const res = await fetch(url.toString(), {
@@ -467,14 +350,14 @@ async function insertConversationMessages(
       conversation_id: conversationId,
       user_id: conversation.user_id,
       role: "user",
-      content: userText,
+      content: String(userText || "").trim(),
       created_at: nowIso,
     },
     {
       conversation_id: conversationId,
       user_id: conversation.user_id,
       role: "assistant",
-      content: assistantText,
+      content: String(assistantText || "").trim(),
       created_at: nowIso,
     },
   ];
@@ -494,20 +377,16 @@ async function insertConversationMessages(
 }
 
 function makeConversationTitleFromText(text, maxLen = 80) {
-  const clean = (text || "").replace(/\s+/g, " ").trim();
+  const clean = String(text || "").replace(/\s+/g, " ").trim();
   if (!clean) return "New Conversation";
   let t = clean;
   if (t.length > maxLen) t = t.slice(0, maxLen - 1) + "…";
   return t.charAt(0).toUpperCase() + t.slice(1);
 }
 
-async function maybeUpdateConversationTitle(
-  conversation,
-  conversationId,
-  firstUserMessage
-) {
+async function maybeUpdateConversationTitle(conversation, conversationId, firstUserMessage) {
   if (!conversation || !conversationId || !firstUserMessage) return;
-  const current = (conversation.title || "").trim();
+  const current = String(conversation.title || "").trim();
   if (current && current !== "New Conversation") return;
 
   const newTitle = makeConversationTitleFromText(firstUserMessage);
@@ -515,7 +394,7 @@ async function maybeUpdateConversationTitle(
 
   await supaFetch("conversations", {
     method: "PATCH",
-    headers: { "Content-Type": "application/json", Prefer: "return-minimal" },
+    headers: { "Content-Type": "application/json", Prefer: "return=minimal" },
     query: { id: `eq.${conversationId}` },
     body: JSON.stringify({
       title: newTitle,
@@ -526,7 +405,7 @@ async function maybeUpdateConversationTitle(
 }
 
 async function buildRollingSummary(existingSummary, messages) {
-  const prev = (existingSummary || "").trim();
+  const prev = String(existingSummary || "").trim();
   if (!messages || !messages.length) return prev;
 
   const historyText = messages
@@ -534,7 +413,7 @@ async function buildRollingSummary(existingSummary, messages) {
     .join("\n");
 
   const sys =
-    "You write a short rolling summary (2–4 sentences, max 500 characters) of an ongoing coaching conversation between a man and his coach. Capture his situation, patterns, and current goals in simple language. Do NOT mention that this is a summary.";
+    "Write a short rolling summary (2–4 sentences, max 500 characters) of an ongoing coaching conversation. Capture situation, patterns, and goals. Do NOT mention that this is a summary.";
   const user = `
 Previous summary (may be empty):
 ${prev || "(none)"}
@@ -553,7 +432,7 @@ Update the summary now, staying under 500 characters.
     { temperature: 0.2, maxTokens: 220 }
   );
 
-  return (summary || "").slice(0, 500);
+  return String(summary || "").slice(0, 500);
 }
 
 async function updateConversationSummary(
@@ -574,7 +453,7 @@ async function updateConversationSummary(
     const nowIso = new Date().toISOString();
     await supaFetch("conversations", {
       method: "PATCH",
-      headers: { "Content-Type": "application/json", Prefer: "return-minimal" },
+      headers: { "Content-Type": "application/json", Prefer: "return=minimal" },
       query: { id: `eq.${conversationId}` },
       body: JSON.stringify({ summary: newSummary, last_updated_at: nowIso }),
     });
@@ -589,7 +468,8 @@ async function updateConversationSummary(
 // ---------- ElevenLabs TTS ----------
 async function elevenLabsTTS(text) {
   if (!ELEVENLABS_API_KEY || !ELEVENLABS_VOICE_ID) return null;
-  const trimmed = (text || "").trim();
+
+  const trimmed = String(text || "").trim();
   if (!trimmed) return null;
 
   const url = `https://api.elevenlabs.io/v1/text-to-speech/${ELEVENLABS_VOICE_ID}`;
@@ -628,14 +508,14 @@ async function elevenLabsTTS(text) {
 
 /**
  * Insert a call_sessions row, resilient to schema differences.
- * Some projects don't have `timestamp`; many use `created_at`.
+ * Some schemas do not accept created_at/timestamp depending on RLS & defaults.
  */
 async function tryInsertCallSession(row) {
   if (!SUPABASE_REST || !SUPABASE_SERVICE_ROLE_KEY) return;
 
   const baseHeaders = {
     "Content-Type": "application/json",
-    Prefer: "return-minimal",
+    Prefer: "return=minimal",
   };
 
   try {
@@ -662,26 +542,13 @@ async function tryInsertCallSession(row) {
 }
 
 // ---------- No-response line generation ----------
-function clampTtsSafe(text, max = 180) {
-  const s = String(text || "")
-    .replace(/[#*_>`]/g, "") // strip common markdown-ish chars just in case
-    .replace(/\s+/g, " ")
-    .trim();
-  if (!s) return "";
-  if (s.length <= max) return s;
-  return s.slice(0, max - 1).trim() + "…";
-}
-
-async function generateNoResponseLine({
-  kind, // "nudge" | "end"
-  recent = [],
-}) {
+async function generateNoResponseLine({ kind, recent = [] }) {
   const mode = kind === "end" ? "end" : "nudge";
 
   const sys = `
-You are AI Blake, a masculine, fatherly Christian coach. Output ONE short, TTS-friendly line only.
+You are AI Blake, a masculine, fatherly Christian coach.
+Output ONE short, TTS-friendly line only.
 No bullet points. No markdown. No quotes. No emojis. No Scripture citations.
-Make it sound natural and not repetitive.
 
 Goal:
 - If mode is nudge: gently check in and invite the man to speak.
@@ -699,7 +566,7 @@ Length:
   const user = `
 Mode: ${mode}
 
-Recent lines to avoid (do not reuse phrasing):
+Recent lines to avoid:
 ${recent.length ? recent.map((s) => `- ${s}`).join("\n") : "(none)"}
 
 Write ONE line now:
@@ -715,7 +582,6 @@ Write ONE line now:
 
   const cleaned = clampTtsSafe(out, mode === "end" ? 210 : 170);
 
-  // Hard fallback if model returns empty
   if (!cleaned) {
     return mode === "end"
       ? "I haven’t heard from you, so I’m going to end this call. Call me again when you’re ready."
@@ -740,34 +606,22 @@ exports.handler = async (event) => {
   }
 
   try {
-    let body = {};
-    try {
-      body = JSON.parse(event.body || "{}");
-    } catch {
-      body = {};
-    }
+    const body = safeJsonParse(event.body, {});
+    const nowIso = new Date().toISOString();
 
-    const source = (body.source || "voice").toLowerCase();
+    const source = String(body.source || "voice").toLowerCase();
 
-    // Accept multiple keys for conversation id
     const conversationId =
       body.conversationId || body.conversation_id || body.c || null;
 
     const callId = body.call_id || body.callId || null;
     const deviceId = body.device_id || body.deviceId || null;
 
-    // NEW: system modes
-    const systemEvent = (body.system_event || body.systemEvent || "")
-      .toString()
-      .trim();
-    const systemSay = (body.system_say || body.systemSay || "")
-      .toString()
-      .trim();
-
-    // If system_say or system_event is present, we bypass the normal coaching reply
+    const systemEvent = String(body.system_event || body.systemEvent || "").trim();
+    const systemSay = String(body.system_say || body.systemSay || "").trim();
     const isSystemMode = Boolean(systemSay || systemEvent);
 
-    // Conversation memory from Supabase (if we have an id)
+    // Conversation memory (optional)
     let conversation = null;
     let recentMessages = [];
     if (SUPABASE_REST && SUPABASE_SERVICE_ROLE_KEY && conversationId) {
@@ -779,9 +633,7 @@ exports.handler = async (event) => {
       }
     }
 
-    const nowIso = new Date().toISOString();
-
-    // ---------- SYSTEM MODE RESPONSE ----------
+    // ---------- SYSTEM MODE ----------
     if (isSystemMode) {
       const key = getNoRespKey(callId, deviceId);
 
@@ -800,7 +652,7 @@ exports.handler = async (event) => {
         reply = "I’m here. If you’re still with me, go ahead and speak.";
       }
 
-      // TTS for system lines too
+      // TTS
       let audio = null;
       try {
         audio = await elevenLabsTTS(reply);
@@ -810,7 +662,7 @@ exports.handler = async (event) => {
 
       // Optional: log system events to call_sessions
       if (LOG_SYSTEM_EVENTS && SUPABASE_REST && SUPABASE_SERVICE_ROLE_KEY) {
-        const userId = body.user_id || "";
+        const userId = String(body.user_id || "");
         const userUuid = pickUuidForHistory(userId);
         try {
           const row = {
@@ -826,55 +678,35 @@ exports.handler = async (event) => {
           };
           await tryInsertCallSession(row);
         } catch (e) {
-          console.error(
-            "[call-coach] call_sessions insert error (system mode):",
-            e
-          );
+          console.error("[call-coach] call_sessions insert error (system mode):", e);
         }
       }
 
-      // ✅ NEW: also log system events into conversation_messages so chat transcript sees them
-      if (
-        conversation &&
-        conversationId &&
-        SUPABASE_REST &&
-        SUPABASE_SERVICE_ROLE_KEY
-      ) {
+      // Log system assistant line into conversation_messages so thread stays synced
+      if (conversation && conversationId && SUPABASE_REST && SUPABASE_SERVICE_ROLE_KEY) {
         try {
-          const row = {
-            conversation_id: conversationId,
-            user_id: conversation.user_id,
-            role: "assistant",
-            content: reply,
-            created_at: nowIso,
-          };
-
           await supaFetch("conversation_messages", {
             method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              Prefer: "return-minimal",
-            },
-            body: JSON.stringify([row]),
+            headers: { "Content-Type": "application/json", Prefer: "return=minimal" },
+            body: JSON.stringify([
+              {
+                conversation_id: conversationId,
+                user_id: conversation.user_id,
+                role: "assistant",
+                content: reply,
+                created_at: nowIso,
+              },
+            ]),
           });
 
           await supaFetch("conversations", {
             method: "PATCH",
-            headers: {
-              "Content-Type": "application/json",
-              Prefer: "return-minimal",
-            },
+            headers: { "Content-Type": "application/json", Prefer: "return=minimal" },
             query: { id: `eq.${conversationId}` },
-            body: JSON.stringify({
-              updated_at: nowIso,
-              last_updated_at: nowIso,
-            }),
+            body: JSON.stringify({ updated_at: nowIso, last_updated_at: nowIso }),
           });
         } catch (e) {
-          console.error(
-            "[call-coach] conversation system-message logging error:",
-            e
-          );
+          console.error("[call-coach] conversation system-message logging error:", e);
         }
       }
 
@@ -900,24 +732,15 @@ exports.handler = async (event) => {
     }
 
     // ---------- NORMAL COACH MODE ----------
-    const rollingSummaryFromClient = (
+    const rollingSummaryFromClient = String(
       body.rolling_summary || body.rollingSummary || ""
-    )
-      .toString()
-      .trim();
+    ).trim();
 
-    const rawUtterance = (
-      body.user_turn ||
-      body.utterance ||
-      body.transcript ||
-      ""
-    )
-      .toString()
-      .trim();
+    const rawUtterance = String(
+      body.user_turn || body.utterance || body.transcript || ""
+    ).trim();
 
-    const userMessageForAI = (body.transcript || rawUtterance || "")
-      .toString()
-      .trim();
+    const userMessageForAI = String(body.transcript || rawUtterance || "").trim();
 
     if (!rawUtterance && !userMessageForAI) {
       return {
@@ -929,9 +752,7 @@ exports.handler = async (event) => {
 
     const historySnippet = recentMessages.length
       ? recentMessages
-          .map(
-            (m) => `${m.role === "user" ? "User" : "Coach"}: ${m.content || ""}`
-          )
+          .map((m) => `${m.role === "user" ? "User" : "Coach"}: ${m.content || ""}`)
           .join("\n")
       : "—";
 
@@ -941,7 +762,7 @@ exports.handler = async (event) => {
       ? `Conversation summary:\n${conversationSummary}\n\nRecent call summary:\n${rollingSummaryFromClient}`
       : conversationSummary;
 
-    // Pinecone KB context
+    // Pinecone KB context (optional)
     const kbQuery = buildKBQuery(rawUtterance || userMessageForAI);
     const kbContext = await getKnowledgeContext(kbQuery);
     const usedKnowledge = Boolean(kbContext && kbContext.trim());
@@ -953,19 +774,13 @@ exports.handler = async (event) => {
     const kbInstruction = `
 CRITICAL INSTRUCTION – KNOWLEDGE BASE USAGE
 
-The system has already searched the Son of Wisdom Pinecone index for this turn and attached the most relevant passages below as KNOWLEDGE BASE CONTEXT.
+If the context below is relevant, use it to ground your answer and stay consistent with Son of Wisdom language and frameworks.
+Synthesize; do not paste large blocks.
+If context is empty or unrelated, answer from Son of Wisdom coaching principles and biblical wisdom.
 
-When the context is relevant, you must:
-- Use it to ground your answer and stay consistent with Son of Wisdom language and frameworks.
-- Prefer this context over your own general memory if there is any conflict.
-- Synthesize and apply the ideas; do not copy large chunks verbatim.
-
-If the context is empty or clearly unrelated, you may answer from general biblical wisdom and Son of Wisdom coaching principles, but you must still check it first.
-
-Never mention Pinecone, embeddings, or any retrieval process. If you mention the source of the ideas, call it “Son of Wisdom material” or “our Son of Wisdom resources”.
+Never mention Pinecone, embeddings, or retrieval.
 
 KNOWLEDGE BASE CONTEXT:
-
 ${kbContext || "No relevant Son of Wisdom knowledge base passages were retrieved for this turn."}
 `.trim();
 
@@ -980,19 +795,19 @@ ${combinedRollingSummary}
 Recent history (oldest to newest):
 ${historySnippet}
 
-Use this context to stay consistent with what has already been shared. Do not read this back to the user.
+Use this context to stay consistent. Do not read this back to the user.
 `.trim();
 
     messages.push({ role: "system", content: memoryInstruction });
     messages.push({ role: "user", content: userMessageForAI });
 
-    const reply = await openaiChat(messages);
-
+    const rawReply = await openaiChat(messages);
+    const reply = clampTtsSafe(rawReply, 1200);
     const assistant_text = reply;
 
-    // Supabase logging:
+    // Supabase logging (optional)
     if (SUPABASE_REST && SUPABASE_SERVICE_ROLE_KEY) {
-      const userId = body.user_id || "";
+      const userId = String(body.user_id || "");
       const userUuid = pickUuidForHistory(userId);
 
       try {
@@ -1010,7 +825,6 @@ Use this context to stay consistent with what has already been shared. Do not re
         console.error("[call-coach] call_sessions insert error:", e);
       }
 
-      // conversation_messages + conversation summary (if conversationId)
       if (conversation && conversationId) {
         try {
           await insertConversationMessages(
