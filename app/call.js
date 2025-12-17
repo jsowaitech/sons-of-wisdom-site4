@@ -1662,8 +1662,8 @@ let bargeTriggered = false;
 
 // ✅ Less sensitive defaults
 const BARGE = {
-  THRESH: 16,
-  HOLD_MS: 320,
+  THRESH: 12,
+  HOLD_MS: 240,
   IGNORE_MS: 450,
 };
 
