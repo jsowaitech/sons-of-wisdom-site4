@@ -1308,6 +1308,13 @@ async function startRecordingLoop() {
 let interimBuffer = "";
 let finalSegments = [];
 
+// Track last AI text to suppress “AI leakage” on mobile
+let lastAssistantText = "";
+
+// Enforce minimum “turn” length/size so we don’t send silence to Whisper
+const TURN_MIN_MS = 900;
+const TURN_MIN_BYTES = 12_000; // ~very small but filters near-silence blobs
+
 function commitInterimToFinal() {
   const t = (interimBuffer || "").trim();
   if (t) {
@@ -1424,6 +1431,8 @@ async function captureOneTurn() {
     recordChunks = [];
     isRecording = true;
 
+    const turnStartedAt = performance.now();
+
     mediaRecorder.ondataavailable = (e) => {
       if (e.data?.size > 0) {
         recordChunks.push(e.data);
@@ -1442,6 +1451,13 @@ async function captureOneTurn() {
       closeNativeRecognizer();
 
       HumeRealtime.stopTurn?.();
+
+      // If the stop happened too quickly (silence), clear chunks so we don’t transcribe garbage
+      const dur = performance.now() - turnStartedAt;
+      const totalBytes = recordChunks.reduce((a, b) => a + (b?.size || 0), 0);
+      if (dur < TURN_MIN_MS || totalBytes < TURN_MIN_BYTES) {
+        recordChunks = [];
+      }
     };
 
     startMicVAD(stream, "#d4a373");
@@ -1469,6 +1485,30 @@ async function captureOneTurn() {
   }
 }
 
+/* ---------- Mobile: suppress “AI leakage” transcripts ---------- */
+function normalizeForCompare(s) {
+  return (s || "")
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .replace(/[^\p{L}\p{N}\s]/gu, "")
+    .trim();
+}
+
+function isLikelyLeakage(userText, assistantText) {
+  const u = normalizeForCompare(userText);
+  const a = normalizeForCompare(assistantText);
+  if (!u || !a) return false;
+  if (u === a) return true;
+  // if user text is mostly the assistant text (audio bleed-through)
+  if (a.length >= 18 && u.length >= 18) {
+    const shared = a.split(" ").filter((w) => w.length > 3 && u.includes(w)).length;
+    const aWords = a.split(" ").filter((w) => w.length > 3).length || 1;
+    const ratio = shared / aWords;
+    if (ratio >= 0.7) return true;
+  }
+  return false;
+}
+
 /* ---------- Upload turn + coach response ---------- */
 async function uploadRecordingAndNotify() {
   if (!recordChunks?.length) return false;
@@ -1485,6 +1525,13 @@ async function uploadRecordingAndNotify() {
     statusText.textContent = "Transcribing…";
     try {
       transcript = await transcribeWithOpenAI(blob, { model: "whisper-1", language: "en" });
+
+      // Drop likely leakage of the AI's last line
+      if (transcript && isLikelyLeakage(transcript, lastAssistantText)) {
+        hudMsg("dropped: leakage");
+        transcript = "";
+      }
+
       if (transcript) transcriptUI.addFinalLine(transcript);
     } catch (e) {
       warn("OpenAI transcription failed", e);
@@ -1568,7 +1615,10 @@ async function uploadRecordingAndNotify() {
   if (rolling_summary) upsertRollingSummary(user_id, device, rolling_summary).catch(() => {});
 
   const assistant_text = (data.assistant_text || data.text || "").toString().trim();
-  if (assistant_text) addTranscriptTurn("assistant", assistant_text);
+  if (assistant_text) {
+    lastAssistantText = assistant_text; // used to suppress mobile leakage
+    addTranscriptTurn("assistant", assistant_text);
+  }
 
   const audio_base64 = data.audio_base64 || "";
   const outMime = data.mime || "audio/mpeg";
@@ -1610,15 +1660,19 @@ let bargeAnalyser = null;
 let bargeRAF = null;
 let bargeTriggered = false;
 
+// ✅ Less sensitive defaults
 const BARGE = {
-  THRESH: 10,
-  HOLD_MS: 240,
+  THRESH: 16,
+  HOLD_MS: 320,
+  IGNORE_MS: 450,
 };
 
-function startBargeInMonitor() {
+function startBargeInMonitor({ ignoreMs = 0 } = {}) {
   stopBargeInMonitor();
 
   if (!navigator.mediaDevices?.getUserMedia) return;
+
+  const ignoreUntil = performance.now() + (ignoreMs || 0);
 
   navigator.mediaDevices
     .getUserMedia({ audio: true })
@@ -1633,19 +1687,28 @@ function startBargeInMonitor() {
       bargeSource.connect(bargeAnalyser);
 
       const data = new Uint8Array(bargeAnalyser.fftSize);
-      let above = 0;
+
+      // ✅ Require consecutive ms above threshold (much less false positives)
+      let streakMs = 0;
 
       const loop = () => {
         if (!bargeAnalyser) return;
+
+        const now = performance.now();
+        if (now < ignoreUntil) {
+          bargeRAF = requestAnimationFrame(loop);
+          return;
+        }
+
         bargeAnalyser.getByteTimeDomainData(data);
         let sum = 0;
         for (let i = 0; i < data.length; i++) sum += Math.abs(data[i] - 128);
         const level = sum / data.length;
 
-        if (level > BARGE.THRESH) above += 16;
-        else above = Math.max(0, above - 24);
+        if (level > BARGE.THRESH) streakMs += 16;
+        else streakMs = 0;
 
-        if (above > BARGE.HOLD_MS) {
+        if (streakMs >= BARGE.HOLD_MS) {
           bargeTriggered = true;
         }
 
@@ -1682,7 +1745,9 @@ function stopBargeInMonitor() {
 
 async function playWithBargeIn(src, { limitMs = 60000 } = {}) {
   bargeTriggered = false;
-  startBargeInMonitor();
+
+  // ✅ ignore first ~450ms so AI audio bleed doesn't trigger barge immediately
+  startBargeInMonitor({ ignoreMs: BARGE.IGNORE_MS });
 
   return new Promise((resolve) => {
     const a = new Audio(src);
