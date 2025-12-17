@@ -1029,17 +1029,13 @@ function buildDeepgramWsUrl() {
 }
 
 function createDeepgramWebSocket(wsUrl, accessToken) {
-  // Most browsers accept (url, ["token", token])
-  try {
-    return new WebSocket(wsUrl, ["token", accessToken]);
-  } catch (e) {
-    // Fallback: some environments accept a single subprotocol string only
-    try {
-      return new WebSocket(wsUrl, "token");
-    } catch {
-      throw e;
-    }
-  }
+  // Safari ONLY works with a single subprotocol string
+  const ws = new WebSocket(wsUrl, `token, ${accessToken}`);
+
+  // REQUIRED for Safari binary audio
+  ws.binaryType = "arraybuffer";
+
+  return ws;
 }
 
 function stopDeepgramRecognizer() {
