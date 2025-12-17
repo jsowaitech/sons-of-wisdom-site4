@@ -243,7 +243,10 @@ function dgHudToken(ok) {
 
 function nowHHMM() {
   try {
-    return new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    return new Date().toLocaleTimeString([], {
+      hour: "2-digit",
+      minute: "2-digit",
+    });
   } catch {
     return "";
   }
@@ -274,7 +277,9 @@ function setAutoScroll(on) {
 
 function ensureTranscriptElementsExist() {
   if (!transcriptListEl || !transcriptInterimEl) {
-    warn("Transcript elements not found. Check call.html ids: transcriptList/transcriptInterim.");
+    warn(
+      "Transcript elements not found. Check call.html ids: transcriptList/transcriptInterim."
+    );
   }
 }
 
@@ -339,7 +344,10 @@ function armIdleAfterAI() {
   cancelIdleTimers();
   idleArmed = true;
   idleStep = 0;
-  idleTimer1 = setTimeout(() => maybeRunNoResponseNudge(), NO_RESPONSE.FIRST_NUDGE_MS);
+  idleTimer1 = setTimeout(
+    () => maybeRunNoResponseNudge(),
+    NO_RESPONSE.FIRST_NUDGE_MS
+  );
 }
 
 function disarmIdle(reason = "") {
@@ -365,10 +373,13 @@ async function callCoachSystemEvent(eventType) {
 
   if (!currentCallId) {
     try {
-      currentCallId = localStorage.getItem("last_call_id") || crypto.randomUUID();
+      currentCallId =
+        localStorage.getItem("last_call_id") || crypto.randomUUID();
       localStorage.setItem("last_call_id", currentCallId);
     } catch {
-      currentCallId = currentCallId || `call_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+      currentCallId =
+        currentCallId ||
+        `call_${Date.now()}_${Math.random().toString(36).slice(2)}`;
     }
   }
 
@@ -387,7 +398,9 @@ async function callCoachSystemEvent(eventType) {
 
   if (!resp.ok) {
     const t = await resp.text().catch(() => "");
-    throw new Error(`call-coach system_event ${resp.status}: ${t || resp.statusText}`);
+    throw new Error(
+      `call-coach system_event ${resp.status}: ${t || resp.statusText}`
+    );
   }
 
   const data = await resp.json().catch(() => ({}));
@@ -495,7 +508,9 @@ function updateCallTimer() {
   const elapsedSec = Math.floor((Date.now() - callStartedAt) / 1000);
   const mins = Math.floor(elapsedSec / 60);
   const secs = elapsedSec % 60;
-  callTimerEl.textContent = `${String(mins).padStart(2, "0")}:${String(secs).padStart(2, "0")}`;
+  callTimerEl.textContent = `${String(mins).padStart(2, "0")}:${String(
+    secs
+  ).padStart(2, "0")}`;
 }
 
 function startCallTimer() {
@@ -683,9 +698,7 @@ function ensureChatUI() {
       </form>
     `;
     chatPanel.style.display = "none";
-    const anchor =
-      document.getElementById("avatar-container") ||
-      document.body;
+    const anchor = document.getElementById("avatar-container") || document.body;
     anchor.insertAdjacentElement("afterend", chatPanel);
   }
   chatLog = chatLog || document.getElementById("chat-log");
@@ -1009,10 +1022,10 @@ async function fetchDeepgramToken() {
 }
 
 /**
- * ✅ IMPORTANT FIX:
- * Do NOT pass token in the query string.
- * For browser WebSockets, authenticate with Sec-WebSocket-Protocol:
- *   new WebSocket(url, ["token", access_token])
+ * ✅ IMPORTANT:
+ * - Do NOT pass token in the query string.
+ * - Authenticate browser WS using Sec-WebSocket-Protocol:
+ *     new WebSocket(url, ["token", access_token])
  */
 function buildDeepgramWsUrl() {
   const u = new URL(DG.endpoint);
@@ -1029,8 +1042,8 @@ function buildDeepgramWsUrl() {
 }
 
 function createDeepgramWebSocket(wsUrl, accessToken) {
-  // Safari ONLY works with a single subprotocol string
-  const ws = new WebSocket(wsUrl, `token, ${accessToken}`);
+  // ✅ Correct: pass subprotocols as an ARRAY (fixes “subprotocol is invalid”)
+  const ws = new WebSocket(wsUrl, ["token", accessToken]);
 
   // REQUIRED for Safari binary audio
   ws.binaryType = "arraybuffer";
@@ -1728,7 +1741,7 @@ async function uploadRecordingAndNotify() {
 
   const transcript = finalSegments.join(" ").replace(/\s+/g, " ").trim();
 
-  // ✅ IMPORTANT FIX: don’t hard-fail the entire call if transcript is empty
+  // ✅ IMPORTANT: don’t hard-fail the entire call if transcript is empty
   // (prevents call-coach 400 Missing transcript loops on mobile)
   if (!transcript) {
     statusText.textContent = "I didn’t catch that — try again.";
@@ -1757,9 +1770,7 @@ async function uploadRecordingAndNotify() {
         });
 
       if (!error && data?.path) {
-        const { data: pub } = supabase.storage
-          .from(SUPABASE_BUCKET)
-          .getPublicUrl(data.path);
+        const { data: pub } = supabase.storage.from(SUPABASE_BUCKET).getPublicUrl(data.path);
         audioUrl = pub?.publicUrl || "";
       }
     } catch (e) {
@@ -1995,9 +2006,7 @@ async function sendChatToN8N(message) {
     }
 
     const data = await resp.json().catch(() => ({}));
-    const reply =
-      (data.reply || data.text || data.output || "").toString().trim() ||
-      "…";
+    const reply = (data.reply || data.text || data.output || "").toString().trim() || "…";
 
     if (typingBubble) {
       typingBubble.parentElement?.classList.remove("typing");
