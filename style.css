@@ -480,7 +480,7 @@ body.chat-app {
   overflow-y: auto;
 }
 
-/* Bubbles */
+/* Bubbles (legacy/global base; kept for compatibility) */
 .bubble {
   max-width: 80%;
   margin-bottom: 0.6rem;
@@ -1194,5 +1194,85 @@ body.ts-live.embed .auto-scroll {
 
   .call-side-transcript iframe {
     min-height: 56vh;
+  }
+}
+
+/* =========================================================
+   FIX: Prevent chat bubble styles from affecting transcript turns
+   (Added patch)
+   ========================================================= */
+
+/* 1) Scope the HOME/CHAT bubbles so they don't leak into transcript turns */
+.chat-panel .bubble,
+.chat-box .bubble {
+  max-width: 80%;
+  margin-bottom: 0.6rem;
+  padding: 0.55rem 0.85rem;
+  border-radius: 14px;
+  font-size: 0.9rem;
+  line-height: 1.45;
+  word-wrap: break-word;
+}
+
+/* If you still use .bubble.user / .bubble.ai on the home page */
+.chat-panel .bubble.user,
+.chat-box .bubble.user {
+  margin-left: auto;
+  background: linear-gradient(135deg, var(--accent), var(--accent-strong));
+  color: var(--text-inverse);
+  border-bottom-right-radius: 4px;
+}
+
+.chat-panel .bubble.ai,
+.chat-box .bubble.ai {
+  margin-right: auto;
+  background: rgba(15, 23, 42, 0.92);
+  border: 1px solid var(--border-subtle);
+  border-bottom-left-radius: 4px;
+}
+
+/* 2) Transcript bubbles: make them deterministic + full-width-friendly */
+.ts-list .turn .bubble {
+  max-width: 100%;
+  margin: 0;                /* transcript spacing controlled by .turn */
+  padding: 0.6rem 0.85rem;
+  border-radius: 14px;
+  font-size: 0.88rem;
+  line-height: 1.45;
+}
+
+/* Ensure transcript body wraps nicely */
+.ts-list .turn .text {
+  word-break: break-word;
+  overflow-wrap: anywhere;
+}
+
+/* 3) Make call-side transcript panel scroll correctly on mobile */
+.page-call .call-side-transcript {
+  min-height: 0;            /* critical for nested flex scrolling */
+}
+
+.page-call .call-side-transcript .transcript-wrap {
+  height: 100%;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Make the list area always scroll instead of the whole page jittering */
+.page-call .call-side-transcript .ts-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+/* 4) Optional: tighten meta line on small screens */
+@media (max-width: 480px) {
+  .ts-list .turn .meta {
+    font-size: 0.72rem;
+  }
+  .ts-list .turn .bubble {
+    padding: 0.55rem 0.75rem;
   }
 }

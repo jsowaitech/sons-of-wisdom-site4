@@ -1,10 +1,10 @@
 // app/call.js
 // Son of Wisdom — Call mode
-// Voice call + inline transcript + mobile Deepgram streaming + on-screen Debug HUD
+// Voice call + inline transcript + Deepgram streaming (always-on for mobile) + on-screen Debug HUD
 //
 // NOTES:
 // - Desktop: uses Web Speech API if available (live captions).
-// - Mobile (Android Chrome / iOS Safari): uses Deepgram WS streaming (live captions).
+// - Mobile (Android/iOS): Deepgram WS streaming is ALWAYS-ON for the whole call (live captions).
 // - The spoken user audio is still recorded via MediaRecorder and sent to call-coach.
 // - Debug HUD appears on the UI (no console needed) and shows DG status/errors.
 //
@@ -17,8 +17,6 @@ import { supabase } from "./supabase.js";
 
 /* ---------- CONFIG ---------- */
 const DEBUG = true;
-
-// ✅ UI Debug HUD (no console needed)
 const DEBUG_HUD = true;
 
 /* Optional: Hume realtime SDK (safe stub if not loaded) */
@@ -31,12 +29,6 @@ const HumeRealtime = window.HumeRealtime ?? {
 HumeRealtime.init?.({ enable: false });
 
 /* ---------- Supabase (OPTIONAL) ---------- */
-/**
- * In local dev you can inject:
- *   window.SUPABASE_SERVICE_ROLE_KEY = "....";
- * For production we recommend proxying through a secure backend instead of
- * exposing a service role key to the browser.
- */
 const SUPABASE_URL = "https://plrobtlpedniyvkpwdmp.supabase.co";
 const SUPABASE_SERVICE_ROLE_KEY = window.SUPABASE_SERVICE_ROLE_KEY || "";
 const HAS_SUPABASE = Boolean(SUPABASE_URL) && Boolean(SUPABASE_SERVICE_ROLE_KEY);
@@ -56,34 +48,25 @@ const SUMMARY_TABLE = "history_summaries";
 const SUMMARY_MAX_CHARS = 380;
 
 /* ---------- n8n webhooks / Netlify endpoints ---------- */
-/** Text chat logic still uses n8n for now. */
 const N8N_WEBHOOK_URL =
   "https://jsonofwisdom.app.n8n.cloud/webhook/4877ebea-544b-42b4-96d6-df41c58d48b0";
 
-/* Optional: AI-transcript webhook (leave empty to disable) */
 const N8N_TRANSCRIBE_URL = "";
 
-/** Local hard-coded replacement for n8n voice workflow */
 const CALL_COACH_ENDPOINT = "/.netlify/functions/call-coach";
-
-/* ---------- Netlify / ElevenLabs greeting ---------- */
 const GREETING_ENDPOINT = "/.netlify/functions/call-greeting";
-
-/* ---------- Deepgram token endpoint (Netlify function) ---------- */
 const DEEPGRAM_TOKEN_ENDPOINT = "/.netlify/functions/deepgram-token";
 
 /* ---------- I/O settings ---------- */
 const ENABLE_MEDIARECORDER_64KBPS = true;
 const TIMESLICE_MS = 100;
 
-// Disable streamed playback on mobile (more fragile there)
 const IS_MOBILE = /Mobi|Android|iPhone|iPad/i.test(navigator.userAgent || "");
 const ENABLE_STREAMED_PLAYBACK = !IS_MOBILE;
 
 /**
- * ✅ Deepgram fallback runs ONLY on mobile.
- * - Desktop: Web Speech API if available
- * - Mobile: Deepgram WS streaming
+ * ✅ Deepgram runs on mobile browsers.
+ * (Always-on for whole call; not per VAD segment)
  */
 const USE_DEEPGRAM_ON_MOBILE = IS_MOBILE;
 
@@ -92,7 +75,7 @@ const USER_ID_KEY = "sow_user_id";
 const DEVICE_ID_KEY = "sow_device_id";
 const SENTINEL_UUID = "00000000-0000-0000-0000-000000000000";
 
-/** the current call session id (used for transcript mode) */
+/** the current call session id */
 let currentCallId = null;
 
 const isUuid = (v) =>
@@ -103,7 +86,7 @@ const isUuid = (v) =>
 /* ---------- Conversation thread (from ?c=...) ---------- */
 const urlParams = new URLSearchParams(window.location.search);
 const conversationId = urlParams.get("c") || null;
-let conversationTitleLocked = false; // once we set title successfully, we stop trying
+let conversationTitleLocked = false;
 
 function getOrCreateDeviceId() {
   let id = localStorage.getItem(DEVICE_ID_KEY);
@@ -120,7 +103,6 @@ function getUserIdForWebhook() {
   return localStorage.getItem(USER_ID_KEY) || getOrCreateDeviceId();
 }
 
-// For history/summary — if we don't have a valid UUID, collapse into sentinel.
 const USER_UUID_OVERRIDE = null;
 const pickUuidForHistory = (user_id) =>
   USER_UUID_OVERRIDE && isUuid(USER_UUID_OVERRIDE)
@@ -140,20 +122,13 @@ const modeBtn = document.getElementById("mode-btn");
 const threadLink =
   document.getElementById("thread-link") || document.getElementById("btn-thread");
 
-// Legacy hidden transcript container (kept for compatibility)
-const legacyTranscriptList = document.getElementById("transcript-list");
-const legacyTranscriptInterim = document.getElementById("transcript-interim");
-
-// ✅ Inline transcript panel
-const transcriptListEl =
-  document.getElementById("transcriptList") || legacyTranscriptList;
-const transcriptInterimEl =
-  document.getElementById("transcriptInterim") || legacyTranscriptInterim;
-
+// ✅ Inline transcript panel (ONLY these)
+const transcriptListEl = document.getElementById("transcriptList");
+const transcriptInterimEl = document.getElementById("transcriptInterim");
 const tsClearBtn = document.getElementById("ts-clear");
 const tsAutoScrollBtn = document.getElementById("ts-autoscroll");
 
-// Chat (created lazily, but Switch-to-Chat navigates to home.html)
+// Chat (created lazily)
 let chatPanel = document.getElementById("chat-panel");
 let chatLog;
 let chatForm;
@@ -163,18 +138,15 @@ let chatInput;
 let isCalling = false;
 let isRecording = false;
 let isPlayingAI = false;
-let inChatView = false;
 
 let callStartedAt = null;
 let callTimerInterval = null;
 
-let globalStream = null;
+let globalStream = null; // ✅ reused for whole call on mobile
 let mediaRecorder = null;
 let recordChunks = [];
 
-/* Native ASR for user live captions */
-const HAS_NATIVE_ASR =
-  "SpeechRecognition" in window || "webkitSpeechRecognition" in window;
+/* Native ASR for desktop live captions */
 let speechRecognizer = null;
 
 /* Audio routing */
@@ -186,10 +158,10 @@ let speakerMuted = false;
 
 /* Greeting prefetch */
 let greetingReadyPromise = null;
-let greetingPayload = null; // { text, audio_base64, mime }
+let greetingPayload = null;
 let greetingAudioUrl = null;
 
-/* ---------- NEW: Idle detection (no response) ---------- */
+/* ---------- Idle detection ---------- */
 const NO_RESPONSE = {
   FIRST_NUDGE_MS: 20_000,
   END_CALL_MS: 20_000,
@@ -197,7 +169,7 @@ const NO_RESPONSE = {
 };
 
 let idleArmed = false;
-let idleStep = 0; // 0=none, 1=nudged
+let idleStep = 0;
 let idleTimer1 = null;
 let idleTimer2 = null;
 let lastUserActivityAt = Date.now();
@@ -302,7 +274,7 @@ function setAutoScroll(on) {
 
 function ensureTranscriptElementsExist() {
   if (!transcriptListEl || !transcriptInterimEl) {
-    warn("Transcript elements not found. Check call.html ids.");
+    warn("Transcript elements not found. Check call.html ids: transcriptList/transcriptInterim.");
   }
 }
 
@@ -349,7 +321,7 @@ function setTranscriptInterim(_speaker, text) {
   if (t) scrollTranscriptToBottom();
 }
 
-/* ---------- NEW: Idle detection helpers ---------- */
+/* ---------- Idle detection helpers ---------- */
 function noteUserActivity() {
   lastUserActivityAt = Date.now();
   cancelIdleTimers();
@@ -712,7 +684,6 @@ function ensureChatUI() {
     `;
     chatPanel.style.display = "none";
     const anchor =
-      document.getElementById("transcript") ||
       document.getElementById("avatar-container") ||
       document.body;
     anchor.insertAdjacentElement("afterend", chatPanel);
@@ -735,15 +706,6 @@ function ensureChatUI() {
   }
 }
 ensureChatUI();
-
-function showCallView() {
-  inChatView = false;
-  if (chatPanel) chatPanel.style.display = "none";
-  statusText.textContent = isCalling
-    ? "Call view on."
-    : "Tap the blue call button to begin.";
-  updateModeBtnUI();
-}
 
 function appendMsg(role, text, { id, typing = false } = {}) {
   if (!chatLog) return null;
@@ -775,13 +737,6 @@ const transcriptUI = {
     if (transcriptInterimEl) transcriptInterimEl.textContent = "";
     if (transcriptListEl) transcriptListEl.innerHTML = "";
     lastFinalLine = "";
-
-    if (legacyTranscriptInterim && legacyTranscriptInterim !== transcriptInterimEl) {
-      legacyTranscriptInterim.textContent = "";
-    }
-    if (legacyTranscriptList && legacyTranscriptList !== transcriptListEl) {
-      legacyTranscriptList.innerHTML = "";
-    }
     scrollTranscriptToBottom();
   },
 
@@ -799,14 +754,6 @@ const transcriptUI = {
     const s = (t || "").trim();
     if (!s || s === lastFinalLine) return;
     lastFinalLine = s;
-
-    if (legacyTranscriptList) {
-      const div = document.createElement("div");
-      div.className = "transcript-line";
-      div.textContent = s;
-      legacyTranscriptList.appendChild(div);
-      legacyTranscriptList.scrollTop = legacyTranscriptList.scrollHeight;
-    }
 
     addTranscriptTurn("user", s);
     setTranscriptInterim("user", "");
@@ -842,22 +789,7 @@ function drawVoiceRing(th = 9, color = "#d4a373") {
   ctx.stroke();
 }
 
-let ringCtx = null;
-let ringAnalyser = null;
-let ringRAF = null;
-
 function stopRing() {
-  if (ringRAF) cancelAnimationFrame(ringRAF);
-  ringRAF = null;
-  try {
-    ringAnalyser?.disconnect();
-  } catch {}
-  if (ringCtx && ringCtx.state !== "closed") {
-    try {
-      ringCtx.close();
-    } catch {}
-  }
-  ringCtx = ringAnalyser = null;
   drawVoiceRing();
 }
 
@@ -917,7 +849,7 @@ function animateRingFromElement(mediaEl, color = "#d4a373") {
   if (!mediaEl.paused && !mediaEl.ended) start();
 }
 
-/* ---------- VAD (endless recording; stop after silence) ---------- */
+/* ---------- VAD (stop MediaRecorder after silence) ---------- */
 const VAD = {
   SILENCE_THRESHOLD: 5,
   SILENCE_TIMEOUT_MS: 3000,
@@ -939,8 +871,6 @@ function startMicVAD(stream, color = "#d4a373") {
   vadAnalyser.fftSize = 2048;
   vadAnalyser.smoothingTimeConstant = 0.75;
   vadSource.connect(vadAnalyser);
-  ringCtx = vadCtx;
-  ringAnalyser = vadAnalyser;
 
   const data = new Uint8Array(vadAnalyser.fftSize);
   const startedAt = performance.now();
@@ -1004,7 +934,7 @@ function stopMicVAD() {
   vadCtx = vadAnalyser = vadSource = null;
 }
 
-/* ---------- Deepgram Mobile Fallback (Streaming WS) ---------- */
+/* ---------- Deepgram (always-on for mobile) ---------- */
 const DG = {
   enable: USE_DEEPGRAM_ON_MOBILE,
   endpoint: "wss://api.deepgram.com/v1/listen",
@@ -1013,7 +943,6 @@ const DG = {
   smart_format: true,
   punctuate: true,
   interim_results: true,
-  vad_events: false,
   endpointing: 50,
   sample_rate: 16000,
 };
@@ -1025,7 +954,6 @@ let dgProcessor = null;
 let dgInputSampleRate = 48000;
 let dgInterim = "";
 
-// Minimal downsampler Float32 -> Int16 PCM
 function downsampleTo16k(float32, inSampleRate, outSampleRate = 16000) {
   if (outSampleRate === inSampleRate) return float32;
 
@@ -1064,7 +992,7 @@ function floatTo16BitPCM(float32) {
 
 async function fetchDeepgramToken() {
   dgHudStatus("token: fetching");
-  const resp = await fetch(`${DEEPGRAM_TOKEN_ENDPOINT}?ttl=60`, { method: "GET" });
+  const resp = await fetch(`${DEEPGRAM_TOKEN_ENDPOINT}?ttl=120`, { method: "GET" });
   if (!resp.ok) {
     const t = await resp.text().catch(() => "");
     dgHudToken(false);
@@ -1091,14 +1019,32 @@ function buildDeepgramWsUrl(token) {
   u.searchParams.set("encoding", "linear16");
   u.searchParams.set("sample_rate", String(DG.sample_rate));
   u.searchParams.set("channels", "1");
-
-  // Deepgram supports passing temporary token as query param for browser WS
-  u.searchParams.set("token", token);
-
+  u.searchParams.set("token", token); // browser WS token
   return u.toString();
 }
 
-function stopDeepgramRecognizer() {
+/**
+ * ✅ IMPORTANT FIX:
+ * When ending a call, send Deepgram a Finalize message and give it a moment
+ * to flush final transcripts before closing the socket.
+ */
+async function finalizeDeepgramStream({ waitMs = 450 } = {}) {
+  const s = dgSocket;
+  if (!s || s.readyState !== WebSocket.OPEN) return;
+
+  try {
+    dgHudMsg("finalize: sending");
+    s.send(JSON.stringify({ type: "Finalize" }));
+  } catch (e) {
+    // ignore
+  }
+
+  // give Deepgram time to send final frames
+  await new Promise((r) => setTimeout(r, waitMs));
+}
+
+async function stopDeepgramRecognizer({ finalize = false } = {}) {
+  // stop audio graph first so we stop sending frames
   try {
     if (dgProcessor) dgProcessor.onaudioprocess = null;
   } catch {}
@@ -1109,6 +1055,13 @@ function stopDeepgramRecognizer() {
     dgSource?.disconnect();
   } catch {}
   dgProcessor = dgSource = null;
+
+  if (finalize) {
+    try {
+      dgHudStatus("finalizing…");
+      await finalizeDeepgramStream({ waitMs: 500 });
+    } catch {}
+  }
 
   if (dgCtx && dgCtx.state !== "closed") {
     try {
@@ -1131,7 +1084,13 @@ function stopDeepgramRecognizer() {
 async function startDeepgramRecognizer(stream) {
   if (!DG.enable) return false;
 
-  stopDeepgramRecognizer();
+  // if already running, keep it
+  if (dgSocket && dgSocket.readyState === WebSocket.OPEN) {
+    dgHudStatus("streaming (already)");
+    return true;
+  }
+
+  await stopDeepgramRecognizer({ finalize: false });
   dgHudStatus("starting");
 
   let token = "";
@@ -1201,23 +1160,22 @@ async function startDeepgramRecognizer(stream) {
         dgInterim = transcript;
         transcriptUI.setInterim(dgInterim);
       }
-    } catch (e) {
+    } catch {
       // ignore non-JSON frames
     }
   };
 
-  // Audio graph: stream -> AudioContext -> ScriptProcessor -> PCM16 -> WS
   dgCtx = new (window.AudioContext || window.webkitAudioContext)();
   if (dgCtx.state === "suspended") dgCtx.resume().catch(() => {});
   dgInputSampleRate = dgCtx.sampleRate || 48000;
 
   dgSource = dgCtx.createMediaStreamSource(stream);
 
-  // ScriptProcessor is deprecated but still widely supported (including Safari)
+  // ScriptProcessor works on Safari
   const bufferSize = 4096;
   dgProcessor = dgCtx.createScriptProcessor(bufferSize, 1, 1);
   dgSource.connect(dgProcessor);
-  dgProcessor.connect(dgCtx.destination); // required in some browsers
+  dgProcessor.connect(dgCtx.destination);
 
   dgProcessor.onaudioprocess = (e) => {
     if (!dgSocket || dgSocket.readyState !== WebSocket.OPEN) return;
@@ -1232,6 +1190,23 @@ async function startDeepgramRecognizer(stream) {
 
   dgHudStatus("streaming");
   return true;
+}
+
+/* ---------- Mic stream: get once per call (mobile reliability) ---------- */
+async function ensureMicStream() {
+  if (globalStream) return globalStream;
+
+  const stream = await navigator.mediaDevices.getUserMedia({
+    audio: {
+      echoCancellation: true,
+      noiseSuppression: true,
+      autoGainControl: true,
+    },
+  });
+
+  globalStream = stream;
+  updateMicTracks();
+  return stream;
 }
 
 /* ---------- Audio I/O helpers ---------- */
@@ -1287,7 +1262,6 @@ function updateModeBtnUI() {
   }
 }
 
-/* ---------- Navigation back to chat thread ---------- */
 function navigateToChatThread() {
   const params = new URLSearchParams(window.location.search);
   const c = params.get("c");
@@ -1343,14 +1317,8 @@ document.addEventListener("keydown", (e) => {
   }
 });
 
-/* Inline transcript panel controls */
-tsClearBtn?.addEventListener("click", () => {
-  transcriptUI.clearAll();
-});
-
-tsAutoScrollBtn?.addEventListener("click", () => {
-  setAutoScroll(!autoScrollOn);
-});
+tsClearBtn?.addEventListener("click", () => transcriptUI.clearAll());
+tsAutoScrollBtn?.addEventListener("click", () => setAutoScroll(!autoScrollOn));
 
 /* ---------- Greeting (ALWAYS transcribable) ---------- */
 async function fetchGreetingJSON() {
@@ -1448,7 +1416,6 @@ async function startCall() {
 
   callBtn.classList.add("call-active");
   transcriptUI.clearAll();
-  showCallView();
   startCallTimer();
 
   try {
@@ -1481,6 +1448,18 @@ async function startCall() {
     greetingPayload = null;
     prepareGreetingForNextCall();
 
+    // ✅ Get mic stream ONCE for the call, then start Deepgram once (mobile)
+    statusText.textContent = "Connecting mic…";
+    const stream = await ensureMicStream();
+
+    if (!isCalling) return;
+
+    if (DG.enable) {
+      statusText.textContent = "Starting live transcription…";
+      await startDeepgramRecognizer(stream);
+    }
+
+    // begin VAD capture loop
     await startRecordingLoop();
   } catch (e) {
     warn("startCall error", e);
@@ -1505,8 +1484,8 @@ function endCall() {
   stopRing();
   stopBargeInMonitor();
 
-  // stop Deepgram
-  stopDeepgramRecognizer();
+  // ✅ stop Deepgram only here — WITH FINALIZE FLUSH
+  stopDeepgramRecognizer({ finalize: true }).catch(() => {});
 
   try {
     globalStream?.getTracks().forEach((t) => t.stop());
@@ -1603,17 +1582,11 @@ function commitInterimToFinal() {
 }
 
 function openNativeRecognizer() {
-  // If Deepgram is enabled (mobile-only), prefer it over WebSpeech
-  if (DG.enable) {
-    log("[SOW] Mobile detected: using Deepgram for live transcription");
-    return;
-  }
+  // ✅ If Deepgram is enabled (mobile), do NOT run Web Speech
+  if (DG.enable) return;
 
   const ASR = window.SpeechRecognition || window.webkitSpeechRecognition;
-  log("ASR available?", !!ASR, ASR);
-
   if (!ASR) {
-    warn("Web Speech API not available; no desktop live captions.");
     transcriptUI.setInterim("Listening…");
     return;
   }
@@ -1693,21 +1666,8 @@ async function captureOneTurn() {
   transcriptUI.setInterim("Listening…");
 
   try {
-    const stream = await navigator.mediaDevices.getUserMedia({
-      audio: {
-        echoCancellation: true,
-        noiseSuppression: true,
-        autoGainControl: true,
-      },
-    });
-
-    if (!isCalling) {
-      stream.getTracks().forEach((t) => t.stop());
-      return false;
-    }
-
-    globalStream = stream;
-    updateMicTracks();
+    // ✅ Use the call-wide mic stream
+    const stream = await ensureMicStream();
 
     let opts = {};
     if (MediaRecorder.isTypeSupported("audio/webm;codecs=opus")) {
@@ -1741,8 +1701,7 @@ async function captureOneTurn() {
       stopRing();
       transcriptUI.setInterim("");
 
-      // stop live caption engines
-      stopDeepgramRecognizer();
+      // ✅ DO NOT stop Deepgram here (always-on for mobile)
       closeNativeRecognizer();
 
       HumeRealtime.stopTurn?.();
@@ -1750,11 +1709,8 @@ async function captureOneTurn() {
 
     startMicVAD(stream, "#d4a373");
 
-    // Start captions
-    openNativeRecognizer();
-    if (DG.enable) {
-      startDeepgramRecognizer(stream).catch((e) => warn("Deepgram start failed", e));
-    }
+    // Start captions engine
+    openNativeRecognizer(); // desktop only
 
     HumeRealtime.startTurn?.(stream, vadCtx);
     mediaRecorder.start(TIMESLICE_MS);
@@ -1776,29 +1732,22 @@ async function captureOneTurn() {
   }
 }
 
-/* ===== PART 2 continues below ===== */
-/* ===== PART 2/2 — app/call.js continues ===== */
-
 /* ---------- Upload turn + coach response ---------- */
 async function uploadRecordingAndNotify() {
   if (!recordChunks?.length) return false;
 
-  // combine transcript segments
   const transcript = finalSegments.join(" ").replace(/\s+/g, " ").trim();
 
-  // try setting conversation title from first meaningful user line
   if (transcript) {
     maybeUpdateConversationTitleFromTranscript(transcript).catch(() => {});
   }
 
-  noteUserActivity(); // user spoke
+  noteUserActivity();
 
-  // Build blob
   const mime = mediaRecorder?.mimeType || "audio/webm";
   const blob = new Blob(recordChunks, { type: mime });
   recordChunks = [];
 
-  // Upload to Supabase storage (optional; if missing service role, skip upload)
   let audioUrl = "";
   const user_id = getUserIdForWebhook();
   const device = getOrCreateDeviceId();
@@ -1824,12 +1773,10 @@ async function uploadRecordingAndNotify() {
     }
   }
 
-  // Rolling summary (optional)
   const prevSummary = await fetchRollingSummary(user_id, device);
   const { pairs } = await fetchLastPairsFromSupabase(user_id, { pairs: 6 });
   const rolling_summary = buildRollingSummary(prevSummary, pairs, transcript);
 
-  // Call coach
   const payload = {
     source: "voice",
     user_id,
@@ -1864,20 +1811,16 @@ async function uploadRecordingAndNotify() {
     return false;
   }
 
-  // Save rolling summary for next turn
   if (rolling_summary) upsertRollingSummary(user_id, device, rolling_summary).catch(() => {});
 
-  // AI response text
   const assistant_text = (data.assistant_text || data.text || "").toString().trim();
   if (assistant_text) addTranscriptTurn("assistant", assistant_text);
 
-  // Play audio if provided
   const audio_base64 = data.audio_base64 || "";
   const outMime = data.mime || "audio/mpeg";
 
   if (!audio_base64) {
     statusText.textContent = "No audio returned. Listening…";
-    // arm idle after AI (but AI didn't speak audio; still treat as done)
     lastAIFinishedAt = Date.now();
     armIdleAfterAI();
     return false;
@@ -1885,7 +1828,6 @@ async function uploadRecordingAndNotify() {
 
   const url = base64ToBlobUrl(audio_base64, outMime);
 
-  // Barge-in: if user starts talking, we can stop playback
   isPlayingAI = true;
   statusText.textContent = "AI speaking…";
 
@@ -1915,7 +1857,7 @@ let bargeRAF = null;
 let bargeTriggered = false;
 
 const BARGE = {
-  THRESH: 10, // avg abs deviation
+  THRESH: 10,
   HOLD_MS: 240,
 };
 
@@ -2025,7 +1967,7 @@ async function playWithBargeIn(src, { limitMs = 60000 } = {}) {
       if (done) return;
       if (bargeTriggered) {
         clearTimeout(t);
-        settle(true); // stop AI early
+        settle(true);
         return;
       }
       requestAnimationFrame(poll);
@@ -2034,7 +1976,7 @@ async function playWithBargeIn(src, { limitMs = 60000 } = {}) {
   });
 }
 
-/* ---------- Chat -> n8n (kept as-is) ---------- */
+/* ---------- Chat -> n8n ---------- */
 async function sendChatToN8N(message) {
   const user_id = getUserIdForWebhook();
   const device_id = getOrCreateDeviceId();
@@ -2085,21 +2027,17 @@ async function sendChatToN8N(message) {
   ensureTranscriptElementsExist();
   setAutoScroll(true);
 
-  // Wire "Return to conversation" link if present
   if (threadLink && conversationId) {
     threadLink.style.display = "";
   }
 
-  // Prefetch greeting immediately
   prepareGreetingForNextCall();
 
-  // Initial UI
   resetCallTimer();
   updateMicUI();
   updateSpeakerUI();
   updateModeBtnUI();
 
-  // Debug HUD initial render
   renderDebugHud();
 })();
 

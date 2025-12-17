@@ -31,7 +31,6 @@
       powered by <span class="brand-mini">Son of Wisdom</span>
     </div>
 
-    <!-- optional: can be shown by JS later -->
     <a id="thread-link" class="btn small" href="#" style="display:none;">
       Return to conversation
     </a>
@@ -62,11 +61,7 @@
           </div>
           <div class="call-timer" id="call-timer">00:00</div>
 
-          <!-- Legacy hidden transcript (kept for compatibility) -->
-          <div id="transcript" class="call-transcript" style="display:none;">
-            <div id="transcript-list" class="transcript-list"></div>
-            <div id="transcript-interim" class="transcript-interim"></div>
-          </div>
+          <!-- ✅ Removed legacy transcript DOM entirely to prevent CSS conflicts -->
 
           <!-- Call controls -->
           <div class="call-controls">
@@ -141,8 +136,8 @@
           </div>
         </div>
 
+        <!-- ✅ This is the only transcript DOM call.js uses -->
         <div id="tsList" class="ts-list" style="flex:1;min-height:0;">
-          <!-- IMPORTANT: ids must match call.js -->
           <div id="transcriptList" class="transcript-list"></div>
           <div id="transcriptInterim" class="transcript-interim"></div>
         </div>
@@ -181,7 +176,6 @@
       });
     }
 
-    // Optional: show "Return to conversation" link if we have c=...
     const threadLink = document.getElementById("thread-link");
     if (threadLink && conversationId) {
       const url = new URL("home.html", window.location.origin);
