@@ -13,15 +13,21 @@
 html,
 body {
   height: 100%;
-  font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
+    sans-serif;
   color: #f9fafb;
-  background: var(--bg-gradient);
+  background: var(--bg-gradient); /* always use the dark gradient */
 }
 
 /* Theme tokens */
 :root {
   --bg-main: #020617;
-  --bg-gradient: radial-gradient(circle at top, #111827 0, #020617 55%, #000000 100%);
+  --bg-gradient: radial-gradient(
+      circle at top,
+      #111827 0,
+      #020617 55%,
+      #000000 100%
+    );
   --bg-elevated: #020b1c;
   --bg-elevated-soft: #050f22;
 
@@ -61,11 +67,29 @@ body.sow-shell {
 }
 
 /* Helper text styles */
-.center { text-align: center; }
-.muted { color: var(--text-muted); }
-.tiny { font-size: 0.75rem; letter-spacing: 0.02em; }
-.row { display: flex; gap: 0.5rem; align-items: center; }
-.brand-mini { font-weight: 600; color: var(--text-gold); }
+.center {
+  text-align: center;
+}
+
+.muted {
+  color: var(--text-muted);
+}
+
+.tiny {
+  font-size: 0.75rem;
+  letter-spacing: 0.02em;
+}
+
+.row {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.brand-mini {
+  font-weight: 600;
+  color: var(--text-gold);
+}
 
 /* Footer */
 .sow-footer {
@@ -92,7 +116,8 @@ body.sow-shell {
   margin: 0 auto 2.2rem;
   border-radius: 50%;
   border: 2px solid var(--accent);
-  box-shadow: 0 0 34px rgba(246, 201, 121, 0.5), 0 0 80px rgba(0, 0, 0, 0.9) inset;
+  box-shadow: 0 0 34px rgba(246, 201, 121, 0.5),
+    0 0 80px rgba(0, 0, 0, 0.9) inset;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -181,12 +206,26 @@ button,
   align-items: center;
   justify-content: center;
   gap: 0.35rem;
-  transition: background 0.18s ease, border-color 0.18s ease, box-shadow 0.18s ease, transform 0.08s ease;
+  transition: background 0.18s ease, border-color 0.18s ease,
+    box-shadow 0.18s ease, transform 0.08s ease;
 }
 
-.btn.small { padding: 0.35rem 0.8rem; font-size: 0.78rem; }
-.btn.pill { border-radius: var(--radius-pill); }
-.btn.circle { width: 3rem; height: 3rem; border-radius: 999px; padding: 0; font-size: 1.2rem; }
+.btn.small {
+  padding: 0.35rem 0.8rem;
+  font-size: 0.78rem;
+}
+
+.btn.pill {
+  border-radius: var(--radius-pill);
+}
+
+.btn.circle {
+  width: 3rem;
+  height: 3rem;
+  border-radius: 999px;
+  padding: 0;
+  font-size: 1.2rem;
+}
 
 .btn.primary {
   background: linear-gradient(135deg, var(--accent), var(--accent-strong));
@@ -229,11 +268,12 @@ button:hover:not(:disabled),
   justify-content: center;
 }
 
-/* Render hamburger as 3 bars */
+/* FIX: actually render a hamburger icon (3 bars) */
 .icon-btn.hamburger {
   flex-direction: column;
   gap: 4px;
 }
+
 .icon-btn.hamburger span {
   display: block;
   width: 1.2rem;
@@ -252,19 +292,96 @@ button:hover:not(:disabled),
   color: var(--text-main);
   font-size: 0.9rem;
   outline: none;
-  transition: background 0.18s ease, border-color 0.18s ease, box-shadow 0.18s ease;
+  transition: background 0.18s ease, border-color 0.18s ease,
+    box-shadow 0.18s ease;
 }
-.input::placeholder { color: var(--text-soft); }
+
+.input::placeholder {
+  color: var(--text-soft);
+}
+
 .input:focus {
   border-color: var(--accent);
-  box-shadow: 0 0 0 1px rgba(246, 201, 121, 0.5), 0 0 28px rgba(15, 23, 42, 0.9);
+  box-shadow: 0 0 0 1px rgba(246, 201, 121, 0.5),
+    0 0 28px rgba(15, 23, 42, 0.9);
 }
 
 /* Status line */
-.status-line { margin-top: 0.4rem; color: var(--text-soft); min-height: 1.1em; }
+.status-line {
+  margin-top: 0.4rem;
+  color: var(--text-soft);
+  min-height: 1.1em;
+}
 
 /* =========================================================
-   APP BAR / CONTENT SHELL
+   AUTH CARD
+   ========================================================= */
+
+.auth-main {
+  width: 100%;
+  max-width: 540px;
+  margin-bottom: 2rem;
+}
+
+.auth-card {
+  background: radial-gradient(
+      ellipse at top,
+      rgba(246, 201, 121, 0.22),
+      rgba(4, 7, 14, 0.96) 60%
+    );
+  border-radius: var(--radius-xl);
+  border: 1px solid var(--border-bright);
+  box-shadow: var(--shadow-soft);
+  padding: 2rem 1.9rem 1.8rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.9rem;
+}
+
+.auth-card-title {
+  text-align: center;
+  font-size: 1.1rem;
+  color: var(--text-main);
+  margin-bottom: 0.4rem;
+}
+
+.auth-field label {
+  display: block;
+  font-size: 0.9rem;
+  margin-bottom: 0.25rem;
+  color: var(--text-main);
+}
+
+.auth-field .auth-input {
+  border-radius: 12px;
+}
+
+.auth-links-row {
+  justify-content: space-between;
+  margin-top: 0.25rem;
+}
+
+.auth-link {
+  color: var(--text-gold);
+  text-decoration: none;
+}
+
+.auth-link:hover {
+  text-decoration: underline;
+}
+
+.auth-submit {
+  margin-top: 0.6rem;
+  width: 100%;
+  justify-content: center;
+}
+
+.auth-status[data-kind="error"] {
+  color: var(--danger);
+}
+
+/* =========================================================
+   APP BAR / CONTENT SHELL (home, call, history)
    ========================================================= */
 
 .appbar {
@@ -284,7 +401,13 @@ button:hover:not(:disabled),
   backdrop-filter: blur(14px);
 }
 
-.powered { text-transform: uppercase; }
+.appbar-plain {
+  border-radius: 999px;
+}
+
+.powered {
+  text-transform: uppercase;
+}
 
 .content {
   width: 100%;
@@ -294,12 +417,16 @@ button:hover:not(:disabled),
 }
 
 /* Chat root */
-body.chat-app { display: flex; flex-direction: column; }
+body.chat-app {
+  display: flex;
+  flex-direction: column;
+}
 
 /* =========================================================
    HOME / CHAT
    ========================================================= */
 
+/* Chips */
 .chips.simple-chips {
   display: flex;
   flex-wrap: wrap;
@@ -316,17 +443,24 @@ body.chat-app { display: flex; flex-direction: column; }
   font-size: 0.78rem;
   cursor: pointer;
   white-space: nowrap;
-  transition: background 0.18s ease, border-color 0.18s ease, transform 0.08s ease;
+  transition: background 0.18s ease, border-color 0.18s ease,
+    transform 0.08s ease;
 }
+
 .chip:hover {
   background: rgba(148, 163, 184, 0.22);
   border-color: rgba(148, 163, 184, 0.95);
   transform: translateY(-1px);
 }
 
+/* Chat panel */
 .chat-panel {
   border-radius: 22px;
-  background: radial-gradient(circle at top left, rgba(246, 201, 121, 0.12), rgba(2, 6, 23, 0.98));
+  background: radial-gradient(
+      circle at top left,
+      rgba(246, 201, 121, 0.12),
+      rgba(2, 6, 23, 0.98)
+    );
   border: 1px solid var(--border-subtle);
   min-height: 260px;
   max-height: calc(100vh - 260px);
@@ -342,7 +476,7 @@ body.chat-app { display: flex; flex-direction: column; }
   overflow-y: auto;
 }
 
-/* bubbles */
+/* Bubbles (legacy/global base; kept for compatibility) */
 .bubble {
   max-width: 80%;
   margin-bottom: 0.6rem;
@@ -352,12 +486,14 @@ body.chat-app { display: flex; flex-direction: column; }
   line-height: 1.45;
   word-wrap: break-word;
 }
+
 .bubble.user {
   margin-left: auto;
   background: linear-gradient(135deg, var(--accent), var(--accent-strong));
   color: var(--text-inverse);
   border-bottom-right-radius: 4px;
 }
+
 .bubble.ai {
   margin-right: auto;
   background: rgba(15, 23, 42, 0.92);
@@ -390,9 +526,21 @@ body.chat-app { display: flex; flex-direction: column; }
   gap: 0.45rem;
 }
 
-.dock-tools { display: flex; gap: 0.4rem; flex-wrap: wrap; }
-.dock-row { display: flex; gap: 0.4rem; align-items: center; }
-.dock-input { border-radius: 999px; }
+.dock-tools {
+  display: flex;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+}
+
+.dock-row {
+  display: flex;
+  gap: 0.4rem;
+  align-items: center;
+}
+
+.dock-input {
+  border-radius: 999px;
+}
 
 #btn-speak.recording {
   background: rgba(248, 113, 113, 0.22);
@@ -401,7 +549,220 @@ body.chat-app { display: flex; flex-direction: column; }
 }
 
 /* allow room for dock */
-body.chat-app .content { padding-bottom: 7.2rem; }
+body.chat-app .content {
+  padding-bottom: 7.2rem;
+}
+
+/* =========================================================
+   CALL SCREEN
+   ========================================================= */
+
+.page-call .call-main {
+  width: 100%;
+  max-width: 640px;
+  margin: 1.4rem auto 2.6rem;
+  padding: 0 0.4rem 1.2rem;
+}
+
+.call-card {
+  background: radial-gradient(
+      circle at top,
+      rgba(246, 201, 121, 0.2),
+      rgba(2, 6, 23, 0.98)
+    );
+  border-radius: 26px;
+  border: 1px solid var(--border-subtle);
+  padding: 1.6rem 1.3rem 1.3rem;
+  box-shadow: var(--shadow-soft);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.7rem;
+}
+
+/* Avatar + ring */
+.call-avatar-wrap {
+  position: relative;
+  margin-bottom: 0.4rem;
+}
+
+.call-avatar-img {
+  position: absolute;
+  inset: 50%;
+  transform: translate(-50%, -50%);
+  width: 92px;
+  height: 92px;
+  border-radius: 999px;
+  object-fit: cover;
+  box-shadow: 0 0 22px rgba(246, 201, 121, 0.7);
+}
+
+.call-status {
+  font-size: 0.9rem;
+  color: var(--text-soft);
+  text-align: center;
+}
+
+.call-timer {
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.12em;
+  font-size: 0.85rem;
+  text-transform: uppercase;
+  color: var(--text-gold);
+}
+
+/* Transcript (live captions from call.js) */
+.call-transcript {
+  margin-top: 0.7rem;
+  width: 100%;
+  max-height: 210px;
+  padding: 0.75rem;
+  border-radius: 18px;
+  background: rgba(2, 6, 23, 0.96);
+  border: 1px solid var(--border-subtle);
+  overflow-y: auto;
+  font-size: 0.85rem;
+}
+
+.transcript-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.transcript-line {
+  color: var(--text-main);
+}
+
+.transcript-interim {
+  margin-top: 0.35rem;
+  color: var(--text-soft);
+  font-style: italic;
+}
+
+/* Hide the obsolete mini transcript bar on the call card;
+   transcripts now live in the right-hand panel */
+.page-call .call-transcript {
+  display: none;
+}
+
+/* Controls */
+.call-controls {
+  margin-top: 0.95rem;
+  display: flex;
+  justify-content: center;
+  gap: 0.65rem;
+}
+
+.btn.call-toggle.call-active {
+  background: linear-gradient(135deg, #f97373, #ef4444);
+  color: var(--text-inverse);
+  box-shadow: 0 0 26px rgba(248, 113, 113, 0.55);
+}
+
+/* Mic & speaker state */
+#mic-btn[aria-pressed="true"],
+#speaker-btn[aria-pressed="false"] {
+  background: rgba(15, 23, 42, 0.9);
+  border-color: rgba(148, 163, 184, 0.85);
+}
+
+/* Call page embedded chat (from call.js) */
+#chat-panel {
+  margin-top: 0.9rem;
+  border-radius: 20px;
+  background: radial-gradient(
+      circle at top left,
+      rgba(246, 201, 121, 0.12),
+      rgba(2, 6, 23, 0.98)
+    );
+  border: 1px solid var(--border-subtle);
+  padding: 0.8rem 0.8rem 0.7rem;
+}
+
+.chat-log {
+  max-height: 170px;
+  overflow-y: auto;
+  padding-right: 0.25rem;
+  margin-bottom: 0.55rem;
+}
+
+.msg {
+  margin-bottom: 0.4rem;
+  display: flex;
+}
+
+.msg.me {
+  justify-content: flex-end;
+}
+
+.msg.ai {
+  justify-content: flex-start;
+}
+
+.msg-bubble {
+  max-width: 80%;
+  padding: 0.45rem 0.75rem;
+  border-radius: 12px;
+  font-size: 0.85rem;
+  line-height: 1.4;
+  background: rgba(15, 23, 42, 0.88);
+  border: 1px solid var(--border-subtle);
+}
+
+.msg.me .msg-bubble {
+  background: linear-gradient(135deg, var(--accent), var(--accent-strong));
+  color: var(--text-inverse);
+}
+
+.chat-input-row {
+  display: flex;
+  gap: 0.4rem;
+}
+
+.chat-input-row input {
+  flex: 1;
+  border-radius: 999px;
+  border: 1px solid var(--border-subtle);
+  background: rgba(15, 23, 42, 0.96);
+  padding: 0.45rem 0.7rem;
+  font-size: 0.85rem;
+  color: var(--text-main);
+}
+
+/* =========================================================
+   CALL: labeled controls (NEW)
+   ========================================================= */
+
+.call-controls.labeled {
+  gap: 0.9rem;
+}
+
+.call-control {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.3rem;
+  min-width: 92px;
+}
+
+.call-label {
+  font-size: 0.72rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: rgba(148, 163, 184, 0.95);
+  user-select: none;
+  text-align: center;
+}
+
+@media (max-width: 480px) {
+  .call-control {
+    min-width: 84px;
+  }
+  .call-label {
+    font-size: 0.7rem;
+  }
+}
 
 /* =========================================================
    HISTORY
@@ -412,6 +773,8 @@ body.sow-shell main.content h2.tiny {
   color: var(--text-soft);
 }
 
+/* Conversation list on history.html */
+
 .conv-list {
   margin-top: 0.4rem;
   display: flex;
@@ -419,6 +782,7 @@ body.sow-shell main.content h2.tiny {
   gap: 0.4rem;
 }
 
+/* IMPORTANT: make conv-item work for both <button> and <div> wrappers */
 .conv-item {
   width: 100%;
   text-align: left;
@@ -431,28 +795,19 @@ body.sow-shell main.content h2.tiny {
   flex-direction: column;
   gap: 0.15rem;
   cursor: pointer;
-  transition: background 0.16s ease, border-color 0.16s ease, transform 0.06s ease, box-shadow 0.16s ease;
-
-  position: relative;
-  padding-right: 3.1rem; /* room for kebab */
-  overflow: visible;     /* IMPORTANT: allow menu to escape the row */
-  z-index: 0;            /* baseline */
+  transition: background 0.16s ease, border-color 0.16s ease,
+    transform 0.06s ease, box-shadow 0.16s ease;
 }
 
-.conv-item:hover {
-  background: rgba(15, 23, 42, 0.98);
-  border-color: var(--accent);
-  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.8);
-  transform: translateY(-1px);
-  z-index: 5; /* lift hovered row */
+.conv-item .title {
+  font-size: 0.9rem;
+  font-weight: 500;
 }
 
-.conv-item.menu-open {
-  z-index: 50; /* lift the row above others when menu is open */
+.conv-item .date {
+  font-size: 0.75rem;
+  color: var(--text-soft);
 }
-
-.conv-item .title { font-size: 0.9rem; font-weight: 500; display: flex; align-items: center; gap: 0.5rem; }
-.conv-item .date { font-size: 0.75rem; color: var(--text-soft); }
 
 .conv-item.empty {
   border-style: dashed;
@@ -461,7 +816,35 @@ body.sow-shell main.content h2.tiny {
   text-align: center;
 }
 
-/* Actions + menu */
+.conv-item:hover {
+  background: rgba(15, 23, 42, 0.98);
+  border-color: var(--accent);
+  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.8);
+  transform: translateY(-1px);
+}
+
+/* =========================================================
+   HISTORY: 3-dot actions + menu
+   ========================================================= */
+
+.conv-item {
+  position: relative;
+  padding-right: 3.1rem; /* room for kebab */
+}
+
+.conv-item[role="button"] {
+  cursor: pointer;
+}
+
+.conv-item.is-disabled {
+  opacity: 0.7;
+  pointer-events: none;
+}
+
+.conv-main {
+  width: 100%;
+}
+
 .conv-actions {
   position: absolute;
   top: 50%;
@@ -470,7 +853,6 @@ body.sow-shell main.content h2.tiny {
   display: flex;
   align-items: center;
   gap: 0.35rem;
-  z-index: 60; /* ensure button sits above row content */
 }
 
 .conv-kebab {
@@ -502,7 +884,6 @@ body.sow-shell main.content h2.tiny {
   transform: none;
 }
 
-/* Menu appears above other rows */
 .conv-menu {
   position: absolute;
   right: 0;
@@ -510,14 +891,17 @@ body.sow-shell main.content h2.tiny {
   min-width: 160px;
   padding: 0.35rem;
   border-radius: 14px;
-  background: rgba(10, 18, 34, 0.98);
+  background: rgba(10, 18, 34, 0.96);
   border: 1px solid rgba(246, 201, 121, 0.35);
   box-shadow: 0 18px 45px rgba(0, 0, 0, 0.75);
   backdrop-filter: blur(14px);
-  z-index: 999; /* THE key: always above other rows */
+  display: none;
+  z-index: 60;
 }
 
-.conv-menu[hidden] { display: none; }
+.conv-actions.open .conv-menu {
+  display: block;
+}
 
 .conv-menu-item {
   width: 100%;
@@ -536,14 +920,29 @@ body.sow-shell main.content h2.tiny {
   border-color: rgba(148, 163, 184, 0.3);
 }
 
-.conv-menu-item.danger { color: #fecaca; }
+.conv-menu-item.danger {
+  color: #fecaca;
+}
+
 .conv-menu-item.danger:hover {
   background: rgba(248, 113, 113, 0.16);
   border-color: rgba(248, 113, 113, 0.35);
 }
 
-/* Inline rename */
-.conv-item .title-text { display: inline-block; }
+/* =========================================================
+   HISTORY: inline rename
+   ========================================================= */
+
+.conv-item .title {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.conv-item .title-text {
+  display: inline-block;
+}
+
 .conv-item .title-edit {
   display: none;
   width: min(520px, 70vw);
@@ -557,8 +956,13 @@ body.sow-shell main.content h2.tiny {
   outline: none;
 }
 
-.conv-item.renaming .title-text { display: none; }
-.conv-item.renaming .title-edit { display: inline-block; }
+.conv-item.renaming .title-text {
+  display: none;
+}
+
+.conv-item.renaming .title-edit {
+  display: inline-block;
+}
 
 .conv-item.renaming {
   border-color: rgba(246, 201, 121, 0.65);
@@ -566,18 +970,472 @@ body.sow-shell main.content h2.tiny {
   transform: none;
 }
 
-.conv-item.is-busy { opacity: 0.7; pointer-events: none; }
-
 /* =========================================================
    Responsive tweaks
    ========================================================= */
 
 @media (max-width: 768px) {
-  .appbar { padding-inline: 0.7rem; }
-  .composer .dock { border-radius: 22px; }
-  .chat-panel { max-height: calc(100vh - 250px); }
+  .sow-hero {
+    margin-top: 2.2rem;
+    margin-bottom: 1.7rem;
+  }
+
+  .auth-card {
+    padding-inline: 1.5rem;
+  }
+
+  .appbar {
+    padding-inline: 0.7rem;
+  }
+
+  .composer .dock {
+    border-radius: 22px;
+  }
+
+  .chat-panel {
+    max-height: calc(100vh - 250px);
+  }
 }
 
 @media (max-width: 480px) {
-  body.sow-shell { padding-inline: 0.9rem; }
+  body.sow-shell {
+    padding-inline: 0.9rem;
+  }
+
+  .sow-hero-logo-ring {
+    width: 130px;
+    height: 130px;
+    margin-bottom: 1.7rem;
+  }
+
+  .auth-card {
+    padding: 1.6rem 1.3rem 1.5rem;
+  }
+
+  .call-card {
+    padding-inline: 1.1rem;
+  }
+}
+
+/* =========================================================
+   TRANSCRIPT PAGE
+   ========================================================= */
+
+.transcript-wrap {
+  max-width: 960px;
+  margin: 1.5rem auto 2.5rem;
+  padding: 1rem 1.2rem 1.2rem;
+  background: rgba(2, 6, 23, 0.98);
+  border-radius: 22px;
+  border: 1px solid var(--border-subtle);
+  box-shadow: var(--shadow-soft);
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+/* Header row */
+.ts-header {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.4);
+  padding-bottom: 0.6rem;
+}
+
+.ts-header .title-wrap {
+  flex: 1;
+}
+
+.ts-header h1 {
+  font-size: 1.1rem;
+  font-weight: 600;
+  color: var(--text-gold);
+  margin-bottom: 0.2rem;
+}
+
+.ts-header .sub {
+  font-size: 0.78rem;
+  color: var(--text-soft);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+/* Back button on transcript page */
+.ts-header .back-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0.45rem 0.75rem;
+  border-radius: 999px;
+  border: 1px solid var(--border-subtle);
+  background: rgba(15, 23, 42, 0.9);
+  color: var(--text-main);
+  font-size: 0.8rem;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.ts-header .back-btn:hover {
+  background: rgba(15, 23, 42, 1);
+  border-color: var(--accent);
+}
+
+/* LIVE badge */
+.live {
+  font-size: 0.7rem;
+  padding: 0.16rem 0.5rem;
+  border-radius: 999px;
+  border: 1px solid rgba(248, 113, 113, 0.5);
+  color: #fecaca;
+  background: rgba(127, 29, 29, 0.55);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.live.is-live {
+  box-shadow: 0 0 16px rgba(248, 113, 113, 0.7);
+}
+
+/* Right-side header actions */
+.ts-header .actions {
+  display: flex;
+  gap: 0.35rem;
+}
+
+.ts-header .actions .ghost {
+  font-size: 0.78rem;
+  padding: 0.35rem 0.8rem;
+  border-radius: 999px;
+  border: 1px solid var(--border-subtle);
+  background: rgba(15, 23, 42, 0.9);
+  color: var(--text-main);
+}
+
+/* Transcript list */
+.ts-list {
+  flex: 1;
+  margin-top: 0.5rem;
+  padding: 0.7rem 0.4rem 0.4rem;
+  border-radius: 16px;
+  background: rgba(2, 6, 23, 0.95);
+  border: 1px solid rgba(30, 64, 175, 0.7);
+  box-shadow: inset 0 0 16px rgba(15, 23, 42, 0.9);
+  overflow-y: auto;
+}
+
+/* Individual turns */
+.turn {
+  margin-bottom: 0.65rem;
+}
+
+.turn .bubble {
+  width: fit-content;
+  max-width: 100%;
+}
+
+/* User vs AI styling for transcript bubbles */
+.turn.user .bubble {
+  margin-left: auto;
+  background: linear-gradient(135deg, var(--accent), var(--accent-strong));
+  color: var(--text-inverse);
+  border-radius: 14px;
+  border-bottom-right-radius: 4px;
+}
+
+.turn.assistant .bubble {
+  margin-right: auto;
+  background: rgba(15, 23, 42, 0.94);
+  border-radius: 14px;
+  border-bottom-left-radius: 4px;
+  border: 1px solid var(--border-subtle);
+}
+
+/* Meta line (role + time) */
+.turn .meta {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 0.5rem;
+  margin-bottom: 0.18rem;
+  font-size: 0.75rem;
+}
+
+.turn .meta .role {
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  font-weight: 500;
+  opacity: 0.9;
+}
+
+.turn.assistant .meta .role {
+  color: var(--text-gold);
+}
+
+.turn.user .meta .role {
+  color: #1f2933;
+}
+
+.turn .meta .time {
+  color: rgba(148, 163, 184, 0.9);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Text body */
+.turn .text {
+  font-size: 0.86rem;
+  line-height: 1.45;
+  white-space: pre-wrap;
+}
+
+/* Audio player inside transcript bubble */
+.turn audio {
+  margin-top: 0.25rem;
+  width: 100%;
+}
+
+/* Footer controls */
+.ts-footer {
+  margin-top: 0.75rem;
+  border-top: 1px solid rgba(148, 163, 184, 0.4);
+  padding-top: 0.6rem;
+}
+
+.ts-footer .row {
+  width: 100%;
+}
+
+.ts-footer span {
+  font-size: 0.8rem;
+  color: var(--text-soft);
+}
+
+.ts-footer input.mono {
+  flex: 1;
+  min-width: 0;
+  padding: 0.45rem 0.6rem;
+  border-radius: 999px;
+  border: 1px solid rgba(30, 64, 175, 0.9);
+  background: rgba(15, 23, 42, 0.96);
+  color: var(--text-main);
+  font-family: "SF Mono", ui-monospace, Menlo, Monaco, Consolas,
+    "Liberation Mono", "Courier New", monospace;
+  font-size: 0.8rem;
+}
+
+.ts-footer button.primary {
+  font-size: 0.8rem;
+  padding: 0.45rem 0.9rem;
+  border-radius: 999px;
+  border: 1px solid rgba(0, 0, 0, 0.6);
+  background: linear-gradient(135deg, var(--accent), var(--accent-strong));
+  color: var(--text-inverse);
+}
+
+.ts-footer .hint {
+  display: block;
+  margin-top: 0.4rem;
+  font-size: 0.75rem;
+  color: var(--text-soft);
+}
+
+.ts-footer .hint code {
+  font-family: "SF Mono", ui-monospace, Menlo, Monaco, Consolas,
+    "Liberation Mono", "Courier New", monospace;
+  font-size: 0.73rem;
+  color: var(--text-gold);
+}
+
+/* Header title-left + dot for "Live Transcription" */
+.ts-header .title-left {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.ts-header .title-left .dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+  background: radial-gradient(circle at center, #22c55e, #15803d);
+  box-shadow: 0 0 12px rgba(34, 197, 94, 0.9);
+}
+
+/* Floating auto-scroll toggle button on transcript page */
+.auto-scroll {
+  position: fixed;
+  right: 1.4rem;
+  bottom: 1.5rem;
+  padding: 0.45rem 0.9rem;
+  border-radius: 999px;
+  border: 1px solid rgba(37, 99, 235, 0.8);
+  background: radial-gradient(
+    circle at top left,
+    rgba(59, 130, 246, 0.9),
+    rgba(37, 99, 235, 0.9)
+  );
+  color: white;
+  font-size: 0.78rem;
+  cursor: pointer;
+  box-shadow: 0 12px 25px rgba(15, 23, 42, 0.9);
+  z-index: 50;
+}
+
+.auto-scroll.on {
+  opacity: 1;
+}
+
+.auto-scroll:not(.on) {
+  opacity: 0.6;
+}
+
+/* When transcript.html is embedded in the call page */
+body.ts-live.embed .transcript-wrap {
+  max-width: none;
+  margin: 0; /* remove outer margin so it fits the iframe */
+  padding: 0.75rem 0.9rem 0.9rem;
+  border-radius: 18px;
+  box-shadow: none;
+  border: none;
+
+  /* Make the inner layout fill the iframe so .ts-list can scroll */
+  height: 100%;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+body.ts-live.embed .auto-scroll {
+  position: absolute;
+  right: 0.9rem;
+  bottom: 0.9rem;
+}
+
+/* =========================================================
+   CALL + TRANSCRIPT SPLIT LAYOUT
+   ========================================================= */
+
+.page-call .content.call-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.1fr);
+  gap: 1rem;
+  align-items: flex-start;
+}
+
+/* Right-hand transcript panel (inline) */
+.call-side-transcript {
+  background: rgba(2, 6, 23, 0.96);
+  border-radius: 22px;
+  border: 1px solid var(--border-subtle);
+  padding: 0.9rem;
+  box-shadow: var(--shadow-soft);
+
+  /* default desktop height */
+  height: 380px;
+
+  display: flex;
+  flex-direction: column;
+}
+
+/* Stack vertically on smaller screens & make transcript readable on phones */
+@media (max-width: 900px) {
+  .page-call .content.call-layout {
+    display: block;
+  }
+
+  .call-side-transcript {
+    margin-top: 1rem;
+    height: auto;
+    min-height: 60vh;
+    max-height: none;
+    padding: 0.85rem;
+  }
+}
+
+@media (max-width: 480px) {
+  .call-side-transcript {
+    min-height: 65vh;
+    padding: 0.8rem;
+  }
+}
+
+/* =========================================================
+   FIX: Prevent chat bubble styles from affecting transcript turns
+   ========================================================= */
+
+/* 1) Scope the HOME/CHAT bubbles so they don't leak into transcript turns */
+.chat-panel .bubble,
+.chat-box .bubble {
+  max-width: 80%;
+  margin-bottom: 0.6rem;
+  padding: 0.55rem 0.85rem;
+  border-radius: 14px;
+  font-size: 0.9rem;
+  line-height: 1.45;
+  word-wrap: break-word;
+}
+
+/* If you still use .bubble.user / .bubble.ai on the home page */
+.chat-panel .bubble.user,
+.chat-box .bubble.user {
+  margin-left: auto;
+  background: linear-gradient(135deg, var(--accent), var(--accent-strong));
+  color: var(--text-inverse);
+  border-bottom-right-radius: 4px;
+}
+
+.chat-panel .bubble.ai,
+.chat-box .bubble.ai {
+  margin-right: auto;
+  background: rgba(15, 23, 42, 0.92);
+  border: 1px solid var(--border-subtle);
+  border-bottom-left-radius: 4px;
+}
+
+/* 2) Transcript bubbles: make them deterministic + full-width-friendly */
+.ts-list .turn .bubble {
+  max-width: 100%;
+  margin: 0; /* transcript spacing controlled by .turn */
+  padding: 0.6rem 0.85rem;
+  border-radius: 14px;
+  font-size: 0.88rem;
+  line-height: 1.45;
+}
+
+/* Ensure transcript body wraps nicely */
+.ts-list .turn .text {
+  word-break: break-word;
+  overflow-wrap: anywhere;
+}
+
+/* 3) Make call-side transcript panel scroll correctly on mobile */
+.page-call .call-side-transcript {
+  min-height: 0; /* critical for nested flex scrolling */
+}
+
+.page-call .call-side-transcript .transcript-wrap {
+  height: 100%;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Make the list area always scroll instead of the whole page jittering */
+.page-call .call-side-transcript .ts-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+/* 4) Optional: tighten meta line on small screens */
+@media (max-width: 480px) {
+  .ts-list .turn .meta {
+    font-size: 0.72rem;
+  }
+  .ts-list .turn .bubble {
+    padding: 0.55rem 0.75rem;
+  }
 }

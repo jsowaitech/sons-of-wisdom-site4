@@ -29,14 +29,14 @@
     <section aria-label="Conversations" style="max-width:980px;margin:0 auto;">
       <h2 class="tiny muted" style="letter-spacing:.08em;margin:12px 0 10px;">CONVERSATIONS</h2>
 
-      <!-- History renders here -->
+      <!-- history.js renders list here -->
       <div id="list" class="conv-list"></div>
     </section>
   </main>
 
-  <!-- Template used by app/history.js -->
+  <!-- IMPORTANT: div row (NOT a button) so kebab button is valid -->
   <template id="conv-item-template">
-    <button class="conv-item" type="button" data-conv-id="">
+    <div class="conv-item" role="button" tabindex="0" data-conv-id="">
       <div class="conv-main">
         <div class="title">
           <span class="title-text"></span>
@@ -46,17 +46,11 @@
       </div>
 
       <div class="conv-actions">
-        <button
-          class="conv-kebab"
-          type="button"
-          aria-label="Conversation options"
-          aria-haspopup="menu"
-          aria-expanded="false"
-        >
+        <button class="conv-kebab" type="button" aria-label="Conversation options">
           <span></span><span></span><span></span>
         </button>
 
-        <div class="conv-menu" role="menu" hidden>
+        <div class="conv-menu" role="menu" aria-hidden="true">
           <button class="conv-menu-item" type="button" data-action="rename" role="menuitem">
             Rename
           </button>
@@ -65,7 +59,7 @@
           </button>
         </div>
       </div>
-    </button>
+    </div>
   </template>
 
   <script type="module" src="app/history.js"></script>
