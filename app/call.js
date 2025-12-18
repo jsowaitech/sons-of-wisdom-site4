@@ -2,8 +2,8 @@
 // Son of Wisdom — Call mode
 // Voice call + inline transcript
 //
-// ✅ Desktop: Web Speech API (live captions)
-// ✅ Mobile: OpenAI Whisper (whisper-1) via Netlify function (turn-based)
+// ✅ Desktop: Web Speech API (live captions) - unchanged
+// ✅ Mobile: OpenAI Whisper (whisper-1) via Netlify function (turn-based, after MediaRecorder stops)
 //
 // Requires:
 // - Netlify function: /.netlify/functions/openai-transcribe  (returns { text })
@@ -115,19 +115,22 @@ const modeBtn = document.getElementById("mode-btn");
 const threadLink =
   document.getElementById("thread-link") || document.getElementById("btn-thread");
 
-// ✅ Control labels
+// ✅ Control labels (added)
 const callLabel = document.getElementById("call-label");
 const micLabel = document.getElementById("mic-label");
 const speakerLabel = document.getElementById("speaker-label");
 
-// ✅ Inline transcript panel
+// ✅ Inline transcript panel (ONLY these)
 const transcriptListEl = document.getElementById("transcriptList");
 const transcriptInterimEl = document.getElementById("transcriptInterim");
 const tsClearBtn = document.getElementById("ts-clear");
 const tsAutoScrollBtn = document.getElementById("ts-autoscroll");
 
-// ✅ iOS-friendly single audio element (hidden in call.html)
-const ttsAudioEl = document.getElementById("tts-audio") || null;
+// Chat (created lazily)
+let chatPanel = document.getElementById("chat-panel");
+let chatLog;
+let chatForm;
+let chatInput;
 
 /* ---------- State ---------- */
 let isCalling = false;
@@ -150,9 +153,6 @@ const managedAudios = new Set();
 let preferredOutputDeviceId = null;
 let micMuted = false;
 let speakerMuted = false;
-
-/* iOS audio unlock state */
-let audioUnlocked = false;
 
 /* Greeting prefetch */
 let greetingReadyPromise = null;
@@ -208,7 +208,6 @@ function renderDebugHud() {
   const lines = [
     `Mobile: ${IS_MOBILE}`,
     `Transcriber: ${IS_MOBILE ? "OpenAI whisper-1" : "Web Speech API"}`,
-    `Audio unlocked: ${audioUnlocked}`,
     `WSR status: ${window.__SOW_WSR_STATUS || ""}`,
     `Last msg: ${window.__SOW_LASTMSG || ""}`,
     `Last err: ${window.__SOW_LASTERR || ""}`,
@@ -396,272 +395,71 @@ function base64ToBlobUrl(b64, mime = "audio/mpeg") {
   return URL.createObjectURL(blob);
 }
 
-/* ---------- iOS audio unlock + single-player helpers ---------- */
-function ensurePlaybackAudioElement() {
-  // Prefer the hidden audio element (best for iOS Safari)
-  if (ttsAudioEl) return ttsAudioEl;
-  // Fallback: create one if missing
-  const a = document.createElement("audio");
-  a.id = "tts-audio-fallback";
-  a.setAttribute("playsinline", "true");
-  a.style.display = "none";
-  document.body.appendChild(a);
-  return a;
-}
-
-async function unlockAudioOnce() {
-  if (audioUnlocked) return true;
-
-  // 1) Resume AudioContext (ring animation uses it too)
+async function playJsonTTS({ text, b64, mime }, { ringColor = "#d4a373" } = {}) {
+  const url = base64ToBlobUrl(b64, mime);
   try {
-    playbackAC ||= new (window.AudioContext || window.webkitAudioContext)();
-    if (playbackAC.state === "suspended") await playbackAC.resume();
-  } catch {}
-
-  // 2) Do a tiny muted play on the SAME audio element we'll reuse
-  try {
-    const a = ensurePlaybackAudioElement();
-    a.muted = true;
-    a.volume = 0;
-    a.playsInline = true;
-
-    // Tiny silent wav (very short) to satisfy iOS gesture requirement.
-    // (No network request; embedded as data URI.)
-    a.src =
-      "data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAgD4AAAB9AAACABAAZGF0YQAAAAA=";
-
-    await a.play();
-    a.pause();
-    a.currentTime = 0;
-    a.muted = speakerMuted;
-    a.volume = speakerMuted ? 0 : 1;
-    a.removeAttribute("src"); // clear
-    audioUnlocked = true;
-    renderDebugHud();
-    return true;
-  } catch (e) {
-    // If this fails, later plays may still work on some devices but iOS often blocks.
-    warn("Audio unlock failed:", e);
-    audioUnlocked = false;
-    renderDebugHud();
-    return false;
-  }
-}
-
-/* ---------- Playback primitives (single element, iOS-safe) ---------- */
-function registerAudioElement(a) {
-  managedAudios.add(a);
-  a.addEventListener("ended", () => managedAudios.delete(a));
-  a.muted = speakerMuted;
-  a.volume = speakerMuted ? 0 : 1;
-  routeElementToPreferredOutput(a).catch(() => {});
-}
-
-async function routeElementToPreferredOutput(el) {
-  if (!("setSinkId" in HTMLMediaElement.prototype)) return;
-  if (!preferredOutputDeviceId) return;
-  try {
-    await el.setSinkId(preferredOutputDeviceId);
-  } catch {}
-}
-
-async function pickSpeakerOutputDevice() {
-  if (!navigator.mediaDevices?.enumerateDevices) return null;
-  try {
-    const outs = (await navigator.mediaDevices.enumerateDevices()).filter(
-      (d) => d.kind === "audiooutput"
-    );
-    if (!outs.length) return null;
-    const speakerish = outs.find((d) => /speaker/i.test(d.label));
-    return speakerish?.deviceId || outs.at(-1).deviceId;
-  } catch {
-    return null;
-  }
-}
-
-function updateMicTracks() {
-  if (globalStream)
-    globalStream.getAudioTracks().forEach((t) => {
-      t.enabled = !micMuted;
-    });
-}
-
-function updateSpeakerUI() {
-  speakerBtn?.setAttribute("aria-pressed", String(!speakerMuted));
-  if (speakerLabel) speakerLabel.textContent = "Speaker";
-}
-
-function updateMicUI() {
-  micBtn?.setAttribute("aria-pressed", String(micMuted));
-  if (micLabel) micLabel.textContent = micMuted ? "Unmute" : "Mute";
-}
-
-function updateModeBtnUI() {
-  if (modeBtn) {
-    modeBtn.setAttribute("aria-pressed", "false");
-    modeBtn.title = "Open this conversation in chat view";
-  }
-}
-
-function navigateToChatThread() {
-  const params = new URLSearchParams(window.location.search);
-  const c = params.get("c");
-  const url = new URL("home.html", window.location.origin);
-  if (c) url.searchParams.set("c", c);
-  window.location.href = url.toString();
-}
-
-/* ---------- Controls ---------- */
-callBtn?.addEventListener("click", () => {
-  if (!isCalling) startCall();
-  else endCall();
-});
-
-micBtn?.addEventListener("click", () => {
-  micMuted = !micMuted;
-  updateMicTracks();
-  updateMicUI();
-  statusText.textContent = micMuted ? "Mic muted." : "Mic unmuted.";
-});
-
-speakerBtn?.addEventListener("click", async () => {
-  const wasMuted = speakerMuted;
-  speakerMuted = !speakerMuted;
-
-  const a = ensurePlaybackAudioElement();
-  a.muted = speakerMuted;
-  a.volume = speakerMuted ? 0 : 1;
-
-  for (const el of managedAudios) {
-    el.muted = speakerMuted;
-    el.volume = speakerMuted ? 0 : 1;
-  }
-  updateSpeakerUI();
-
-  if (wasMuted && !speakerMuted && "setSinkId" in HTMLMediaElement.prototype) {
-    if (!preferredOutputDeviceId) preferredOutputDeviceId = await pickSpeakerOutputDevice();
-    if (preferredOutputDeviceId) {
-      for (const el of managedAudios) await routeElementToPreferredOutput(el);
-      await routeElementToPreferredOutput(a);
-      statusText.textContent = "Speaker output active.";
-    }
-  }
-});
-
-modeBtn?.addEventListener("click", (e) => {
-  e.preventDefault();
-  navigateToChatThread();
-});
-
-threadLink?.addEventListener("click", (e) => {
-  e.preventDefault();
-  navigateToChatThread();
-});
-
-document.addEventListener("keydown", (e) => {
-  if (e.key?.toLowerCase?.() === "c") {
-    e.preventDefault();
-    navigateToChatThread();
-  }
-});
-
-tsClearBtn?.addEventListener("click", () => transcriptUI.clearAll());
-tsAutoScrollBtn?.addEventListener("click", () => setAutoScroll(!autoScrollOn));
-
-/* ---------- OpenAI Whisper (mobile) ---------- */
-async function transcribeWithOpenAI(blob, { model = "whisper-1", language = "en" } = {}) {
-  if (!blob || blob.size < 1000) return "";
-
-  hudStatus("transcribe: uploading");
-  hudErr("");
-  hudMsg("");
-
-  const fd = new FormData();
-  fd.append("file", blob, "audio.webm");
-  fd.append("model", model);
-  fd.append("language", language);
-
-  const resp = await fetch(OPENAI_TRANSCRIBE_ENDPOINT, { method: "POST", body: fd });
-  if (!resp.ok) {
-    const t = await resp.text().catch(() => "");
-    throw new Error(`openai-transcribe ${resp.status}: ${t || resp.statusText}`);
-  }
-  const data = await resp.json().catch(() => ({}));
-  const text = (data.text || "").toString().trim();
-  hudStatus(text ? "transcribe: ok" : "transcribe: empty");
-  hudMsg(text ? `final: ${text.slice(0, 80)}` : "");
-  return text;
-}
-
-/* ---------- Greeting (ALWAYS transcribable) ---------- */
-async function fetchGreetingJSON() {
-  const user_id = getUserIdForWebhook();
-  const device = getOrCreateDeviceId();
-
-  const resp = await fetch(GREETING_ENDPOINT, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ user_id, device_id: device }),
-  });
-
-  if (!resp.ok) {
-    const t = await resp.text().catch(() => "");
-    throw new Error(`Greeting HTTP ${resp.status}: ${t || resp.statusText}`);
-  }
-
-  const data = await resp.json().catch(() => ({}));
-  const text = (data.assistant_text || data.text || "").toString().trim();
-  const audio_base64 = data.audio_base64 || "";
-  const mime = data.mime || "audio/mpeg";
-
-  if (!text) throw new Error("Greeting missing text");
-  if (!audio_base64) throw new Error("Greeting missing audio_base64");
-
-  return { text, audio_base64, mime };
-}
-
-async function prepareGreetingForNextCall() {
-  greetingReadyPromise = (async () => {
+    if (text) addTranscriptTurn("assistant", text);
+    await safePlayOnce(url, { limitMs: 60_000, color: ringColor });
+  } finally {
     try {
-      const payload = await fetchGreetingJSON();
-      greetingPayload = payload;
-
-      if (greetingAudioUrl) {
-        try {
-          URL.revokeObjectURL(greetingAudioUrl);
-        } catch {}
-      }
-      greetingAudioUrl = base64ToBlobUrl(payload.audio_base64, payload.mime);
-      log("[SOW] Greeting prefetched (JSON).");
-      return true;
-    } catch (e) {
-      warn("Greeting prefetch failed", e);
-      greetingPayload = null;
-      if (greetingAudioUrl) {
-        try {
-          URL.revokeObjectURL(greetingAudioUrl);
-        } catch {}
-      }
-      greetingAudioUrl = null;
-      return false;
-    }
-  })();
+      URL.revokeObjectURL(url);
+    } catch {}
+  }
 }
 
-async function ensureGreetingReadyWithRetry() {
-  if (!greetingReadyPromise) prepareGreetingForNextCall();
+async function maybeRunNoResponseNudge() {
+  if (!shouldConsiderIdle()) return;
+  if (idleInFlight) return;
+  if (idleStep !== 0) return;
 
-  let ok = await greetingReadyPromise;
-  greetingReadyPromise = null;
+  idleInFlight = true;
 
-  if (ok && greetingPayload && greetingAudioUrl) return true;
+  try {
+    statusText.textContent = "Still there…";
+    const payload = await callCoachSystemEvent("no_response_nudge");
+    if (!isCalling) return;
 
-  await new Promise((r) => setTimeout(r, 450));
-  prepareGreetingForNextCall();
-  ok = await greetingReadyPromise;
-  greetingReadyPromise = null;
+    isPlayingAI = true;
+    await playJsonTTS(payload, { ringColor: "#d4a373" });
+  } catch (e) {
+    warn("no_response_nudge failed", e);
+  } finally {
+    isPlayingAI = false;
+    idleInFlight = false;
+    if (!isCalling) return;
 
-  return Boolean(ok && greetingPayload && greetingAudioUrl);
+    if (Date.now() - lastUserActivityAt < 500) {
+      disarmIdle("user activity after nudge");
+      return;
+    }
+
+    idleStep = 1;
+    idleTimer2 = setTimeout(() => maybeRunNoResponseEnd(), NO_RESPONSE.END_CALL_MS);
+  }
+}
+
+async function maybeRunNoResponseEnd() {
+  if (!shouldConsiderIdle()) return;
+  if (idleInFlight) return;
+  if (idleStep !== 1) return;
+
+  idleInFlight = true;
+
+  try {
+    statusText.textContent = "Ending call…";
+    const payload = await callCoachSystemEvent("no_response_end");
+    if (!isCalling) return;
+
+    isPlayingAI = true;
+    await playJsonTTS(payload, { ringColor: "#d4a373" });
+  } catch (e) {
+    warn("no_response_end failed", e);
+  } finally {
+    isPlayingAI = false;
+    idleInFlight = false;
+    if (!isCalling) return;
+    endCall();
+  }
 }
 
 /* ---------- Call duration timer helpers ---------- */
@@ -865,11 +663,6 @@ function buildRollingSummary(prevSummary, pairs, newest, maxChars = SUMMARY_MAX_
 }
 
 /* ---------- UI: Chat ---------- */
-let chatPanel = document.getElementById("chat-panel");
-let chatLog;
-let chatForm;
-let chatInput;
-
 function ensureChatUI() {
   if (!chatPanel) {
     chatPanel = document.createElement("div");
@@ -1000,11 +793,7 @@ function animateRingFromElement(mediaEl, color = "#d4a373") {
 
   const start = () => {
     stop();
-    try {
-      src = playbackAC.createMediaElementSource(mediaEl);
-    } catch {
-      return;
-    }
+    src = playbackAC.createMediaElementSource(mediaEl);
     gain = playbackAC.createGain();
     analyser = playbackAC.createAnalyser();
     analyser.fftSize = 1024;
@@ -1152,113 +941,215 @@ async function ensureMicStream() {
   return stream;
 }
 
-/* ---------- Idle response helpers (uses same playback path) ---------- */
-async function playJsonTTS({ text, b64, mime }, { ringColor = "#d4a373" } = {}) {
-  const url = base64ToBlobUrl(b64, mime);
+/* ---------- Audio I/O helpers ---------- */
+function registerAudioElement(a) {
+  managedAudios.add(a);
+  a.addEventListener("ended", () => managedAudios.delete(a));
+  a.muted = speakerMuted;
+  a.volume = speakerMuted ? 0 : 1;
+  routeElementToPreferredOutput(a).catch(() => {});
+}
+
+async function routeElementToPreferredOutput(el) {
+  if (!("setSinkId" in HTMLMediaElement.prototype)) return;
+  if (!preferredOutputDeviceId) return;
   try {
-    if (text) addTranscriptTurn("assistant", text);
-    await safePlayOnce(url, { limitMs: 60_000, color: ringColor });
-  } finally {
-    try {
-      URL.revokeObjectURL(url);
-    } catch {}
+    await el.setSinkId(preferredOutputDeviceId);
+  } catch {}
+}
+
+async function pickSpeakerOutputDevice() {
+  if (!navigator.mediaDevices?.enumerateDevices) return null;
+  try {
+    const outs = (await navigator.mediaDevices.enumerateDevices()).filter(
+      (d) => d.kind === "audiooutput"
+    );
+    if (!outs.length) return null;
+    const speakerish = outs.find((d) => /speaker/i.test(d.label));
+    return speakerish?.deviceId || outs.at(-1).deviceId;
+  } catch {
+    return null;
   }
 }
 
-async function maybeRunNoResponseNudge() {
-  if (!shouldConsiderIdle()) return;
-  if (idleInFlight) return;
-  if (idleStep !== 0) return;
+function updateMicTracks() {
+  if (globalStream)
+    globalStream.getAudioTracks().forEach((t) => {
+      t.enabled = !micMuted;
+    });
+}
 
-  idleInFlight = true;
+// ✅ updated: also set label
+function updateSpeakerUI() {
+  speakerBtn?.setAttribute("aria-pressed", String(!speakerMuted));
+  if (speakerLabel) speakerLabel.textContent = "Speaker";
+}
 
-  try {
-    statusText.textContent = "Still there…";
-    const payload = await callCoachSystemEvent("no_response_nudge");
-    if (!isCalling) return;
+// ✅ updated: also set label (Mute/Unmute)
+function updateMicUI() {
+  micBtn?.setAttribute("aria-pressed", String(micMuted));
+  if (micLabel) micLabel.textContent = micMuted ? "Unmute" : "Mute";
+}
 
-    isPlayingAI = true;
-    await playJsonTTS(payload, { ringColor: "#d4a373" });
-  } catch (e) {
-    warn("no_response_nudge failed", e);
-  } finally {
-    isPlayingAI = false;
-    idleInFlight = false;
-    if (!isCalling) return;
+function updateModeBtnUI() {
+  if (modeBtn) {
+    modeBtn.setAttribute("aria-pressed", "false");
+    modeBtn.title = "Open this conversation in chat view";
+  }
+}
 
-    if (Date.now() - lastUserActivityAt < 500) {
-      disarmIdle("user activity after nudge");
-      return;
+function navigateToChatThread() {
+  const params = new URLSearchParams(window.location.search);
+  const c = params.get("c");
+  const url = new URL("home.html", window.location.origin);
+  if (c) url.searchParams.set("c", c);
+  window.location.href = url.toString();
+}
+
+/* ---------- Controls ---------- */
+callBtn?.addEventListener("click", () => {
+  if (!isCalling) startCall();
+  else endCall();
+});
+
+micBtn?.addEventListener("click", () => {
+  micMuted = !micMuted;
+  updateMicTracks();
+  updateMicUI();
+  statusText.textContent = micMuted ? "Mic muted." : "Mic unmuted.";
+});
+
+speakerBtn?.addEventListener("click", async () => {
+  const wasMuted = speakerMuted;
+  speakerMuted = !speakerMuted;
+  for (const el of managedAudios) {
+    el.muted = speakerMuted;
+    el.volume = speakerMuted ? 0 : 1;
+  }
+  updateSpeakerUI();
+  if (wasMuted && !speakerMuted && "setSinkId" in HTMLMediaElement.prototype) {
+    if (!preferredOutputDeviceId) preferredOutputDeviceId = await pickSpeakerOutputDevice();
+    if (preferredOutputDeviceId) {
+      for (const el of managedAudios) await routeElementToPreferredOutput(el);
+      statusText.textContent = "Speaker output active.";
     }
-
-    idleStep = 1;
-    idleTimer2 = setTimeout(() => maybeRunNoResponseEnd(), NO_RESPONSE.END_CALL_MS);
   }
+});
+
+modeBtn?.addEventListener("click", (e) => {
+  e.preventDefault();
+  navigateToChatThread();
+});
+
+threadLink?.addEventListener("click", (e) => {
+  e.preventDefault();
+  navigateToChatThread();
+});
+
+document.addEventListener("keydown", (e) => {
+  if (e.key?.toLowerCase?.() === "c") {
+    e.preventDefault();
+    navigateToChatThread();
+  }
+});
+
+tsClearBtn?.addEventListener("click", () => transcriptUI.clearAll());
+tsAutoScrollBtn?.addEventListener("click", () => setAutoScroll(!autoScrollOn));
+
+/* ---------- OpenAI Whisper (mobile) ---------- */
+async function transcribeWithOpenAI(blob, { model = "whisper-1", language = "en" } = {}) {
+  if (!blob || blob.size < 1000) return "";
+
+  hudStatus("transcribe: uploading");
+  hudErr("");
+  hudMsg("");
+
+  const fd = new FormData();
+  fd.append("file", blob, "audio.webm");
+  fd.append("model", model);
+  fd.append("language", language);
+
+  const resp = await fetch(OPENAI_TRANSCRIBE_ENDPOINT, { method: "POST", body: fd });
+  if (!resp.ok) {
+    const t = await resp.text().catch(() => "");
+    throw new Error(`openai-transcribe ${resp.status}: ${t || resp.statusText}`);
+  }
+  const data = await resp.json().catch(() => ({}));
+  const text = (data.text || "").toString().trim();
+  hudStatus(text ? "transcribe: ok" : "transcribe: empty");
+  hudMsg(text ? `final: ${text.slice(0, 80)}` : "");
+  return text;
 }
 
-async function maybeRunNoResponseEnd() {
-  if (!shouldConsiderIdle()) return;
-  if (idleInFlight) return;
-  if (idleStep !== 1) return;
+/* ---------- Greeting (ALWAYS transcribable) ---------- */
+async function fetchGreetingJSON() {
+  const user_id = getUserIdForWebhook();
+  const device = getOrCreateDeviceId();
 
-  idleInFlight = true;
-
-  try {
-    statusText.textContent = "Ending call…";
-    const payload = await callCoachSystemEvent("no_response_end");
-    if (!isCalling) return;
-
-    isPlayingAI = true;
-    await playJsonTTS(payload, { ringColor: "#d4a373" });
-  } catch (e) {
-    warn("no_response_end failed", e);
-  } finally {
-    isPlayingAI = false;
-    idleInFlight = false;
-    if (!isCalling) return;
-    endCall();
-  }
-}
-
-/* ---------- Small one-shot clips (ring/greeting/etc) ---------- */
-function safePlayOnce(src, { limitMs = 15000, color = "#d4a373" } = {}) {
-  return new Promise((res) => {
-    const a = ensurePlaybackAudioElement();
-    registerAudioElement(a);
-
-    let done = false;
-    const settle = (ok) => {
-      if (done) return;
-      done = true;
-      a.onended = a.onerror = a.onabort = a.oncanplaythrough = null;
-      stopRing();
-      res(ok);
-    };
-
-    a.preload = "auto";
-    a.src = src;
-    a.playsInline = true;
-    a.muted = speakerMuted;
-    a.volume = speakerMuted ? 0 : 1;
-
-    animateRingFromElement(a, color);
-
-    a.oncanplaythrough = () => {
-      try {
-        a.play().catch(() => settle(false));
-      } catch {
-        settle(false);
-      }
-    };
-    a.onerror = () => settle(false);
-    a.onabort = () => settle(false);
-
-    const t = setTimeout(() => settle(false), limitMs);
-    a.onended = () => {
-      clearTimeout(t);
-      settle(true);
-    };
+  const resp = await fetch(GREETING_ENDPOINT, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ user_id, device_id: device }),
   });
+
+  if (!resp.ok) {
+    const t = await resp.text().catch(() => "");
+    throw new Error(`Greeting HTTP ${resp.status}: ${t || resp.statusText}`);
+  }
+
+  const data = await resp.json().catch(() => ({}));
+  const text = (data.assistant_text || data.text || "").toString().trim();
+  const audio_base64 = data.audio_base64 || "";
+  const mime = data.mime || "audio/mpeg";
+
+  if (!text) throw new Error("Greeting missing text");
+  if (!audio_base64) throw new Error("Greeting missing audio_base64");
+
+  return { text, audio_base64, mime };
+}
+
+async function prepareGreetingForNextCall() {
+  greetingReadyPromise = (async () => {
+    try {
+      const payload = await fetchGreetingJSON();
+      greetingPayload = payload;
+
+      if (greetingAudioUrl) {
+        try {
+          URL.revokeObjectURL(greetingAudioUrl);
+        } catch {}
+      }
+      greetingAudioUrl = base64ToBlobUrl(payload.audio_base64, payload.mime);
+      log("[SOW] Greeting prefetched (JSON).");
+      return true;
+    } catch (e) {
+      warn("Greeting prefetch failed", e);
+      greetingPayload = null;
+      if (greetingAudioUrl) {
+        try {
+          URL.revokeObjectURL(greetingAudioUrl);
+        } catch {}
+      }
+      greetingAudioUrl = null;
+      return false;
+    }
+  })();
+}
+
+async function ensureGreetingReadyWithRetry() {
+  if (!greetingReadyPromise) prepareGreetingForNextCall();
+
+  let ok = await greetingReadyPromise;
+  greetingReadyPromise = null;
+
+  if (ok && greetingPayload && greetingAudioUrl) return true;
+
+  await new Promise((r) => setTimeout(r, 450));
+  prepareGreetingForNextCall();
+  ok = await greetingReadyPromise;
+  greetingReadyPromise = null;
+
+  return Boolean(ok && greetingPayload && greetingAudioUrl);
 }
 
 /* ---------- Call flow ---------- */
@@ -1268,9 +1159,6 @@ async function startCall() {
 
   disarmIdle("startCall");
   noteUserActivity();
-
-  // ✅ unlock audio on the user tap (CRITICAL for iPhone Safari)
-  await unlockAudioOnce();
 
   // ✅ label + aria update
   if (callLabel) callLabel.textContent = "End Call";
@@ -1372,15 +1260,15 @@ function endCall() {
 
   closeNativeRecognizer();
 
-  // stop playback element
-  try {
-    const a = ensurePlaybackAudioElement();
-    a.pause();
-    const src = a.src;
-    a.removeAttribute("src");
-    a.load?.();
-    if (src?.startsWith("blob:")) URL.revokeObjectURL(src);
-  } catch {}
+  for (const el of Array.from(managedAudios)) {
+    try {
+      el.pause();
+      const src = el.src;
+      el.src = "";
+      if (src?.startsWith("blob:")) URL.revokeObjectURL(src);
+    } catch {}
+    managedAudios.delete(el);
+  }
 
   if (greetingAudioUrl) {
     try {
@@ -1390,6 +1278,41 @@ function endCall() {
   }
 
   hudStatus("call ended");
+}
+
+/* Small one-shot clips (ring/greeting/etc) */
+function safePlayOnce(src, { limitMs = 15000, color = "#d4a373" } = {}) {
+  return new Promise((res) => {
+    const a = new Audio(src);
+    a.preload = "auto";
+    registerAudioElement(a);
+    animateRingFromElement(a, color);
+    let done = false;
+
+    const settle = (ok) => {
+      if (done) return;
+      done = true;
+      a.onended = a.onerror = a.onabort = a.oncanplaythrough = null;
+      stopRing();
+      res(ok);
+    };
+
+    a.oncanplaythrough = () => {
+      try {
+        a.play().catch(() => settle(false));
+      } catch {
+        settle(false);
+      }
+    };
+    a.onerror = () => settle(false);
+    a.onabort = () => settle(false);
+
+    const t = setTimeout(() => settle(false), limitMs);
+    a.onended = () => {
+      clearTimeout(t);
+      settle(true);
+    };
+  });
 }
 
 /* ---------- Continuous capture loop ---------- */
@@ -1415,7 +1338,7 @@ let lastAssistantText = "";
 
 // Enforce minimum “turn” length/size so we don’t send silence to Whisper
 const TURN_MIN_MS = 900;
-const TURN_MIN_BYTES = 12_000;
+const TURN_MIN_BYTES = 12_000; // ~very small but filters near-silence blobs
 
 function commitInterimToFinal() {
   const t = (interimBuffer || "").trim();
@@ -1428,6 +1351,7 @@ function commitInterimToFinal() {
 }
 
 function openNativeRecognizer() {
+  // ✅ Desktop only (you said it works wonderfully there)
   if (IS_MOBILE) return;
 
   const ASR = window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -1511,6 +1435,7 @@ async function captureOneTurn() {
   transcriptUI.setInterim("Listening…");
 
   try {
+    // ✅ Use the call-wide mic stream
     const stream = await ensureMicStream();
 
     let opts = {};
@@ -1547,9 +1472,12 @@ async function captureOneTurn() {
       stopRing();
       transcriptUI.setInterim("");
 
+      // stop desktop recognizer per-turn
       closeNativeRecognizer();
+
       HumeRealtime.stopTurn?.();
 
+      // If the stop happened too quickly (silence), clear chunks so we don’t transcribe garbage
       const dur = performance.now() - turnStartedAt;
       const totalBytes = recordChunks.reduce((a, b) => a + (b?.size || 0), 0);
       if (dur < TURN_MIN_MS || totalBytes < TURN_MIN_BYTES) {
@@ -1558,6 +1486,8 @@ async function captureOneTurn() {
     };
 
     startMicVAD(stream, "#d4a373");
+
+    // Start captions engine (desktop only)
     openNativeRecognizer();
 
     HumeRealtime.startTurn?.(stream, vadCtx);
@@ -1594,6 +1524,7 @@ function isLikelyLeakage(userText, assistantText) {
   const a = normalizeForCompare(assistantText);
   if (!u || !a) return false;
   if (u === a) return true;
+  // if user text is mostly the assistant text (audio bleed-through)
   if (a.length >= 18 && u.length >= 18) {
     const shared = a.split(" ").filter((w) => w.length > 3 && u.includes(w)).length;
     const aWords = a.split(" ").filter((w) => w.length > 3).length || 1;
@@ -1607,17 +1538,20 @@ function isLikelyLeakage(userText, assistantText) {
 async function uploadRecordingAndNotify() {
   if (!recordChunks?.length) return false;
 
+  // Desktop may already have Web Speech segments
   let transcript = finalSegments.join(" ").replace(/\s+/g, " ").trim();
 
   const mime = mediaRecorder?.mimeType || "audio/webm";
   const blob = new Blob(recordChunks, { type: mime });
   recordChunks = [];
 
+  // ✅ Mobile: use OpenAI Whisper if Web Speech produced nothing
   if (IS_MOBILE && !transcript) {
     statusText.textContent = "Transcribing…";
     try {
       transcript = await transcribeWithOpenAI(blob, { model: "whisper-1", language: "en" });
 
+      // Drop likely leakage of the AI's last line
       if (transcript && isLikelyLeakage(transcript, lastAssistantText)) {
         hudMsg("dropped: leakage");
         transcript = "";
@@ -1631,6 +1565,7 @@ async function uploadRecordingAndNotify() {
     }
   }
 
+  // ✅ Don’t hard-fail the entire call if transcript is empty
   if (!transcript) {
     statusText.textContent = "I didn’t catch that — try again.";
     return false;
@@ -1706,7 +1641,7 @@ async function uploadRecordingAndNotify() {
 
   const assistant_text = (data.assistant_text || data.text || "").toString().trim();
   if (assistant_text) {
-    lastAssistantText = assistant_text;
+    lastAssistantText = assistant_text; // used to suppress mobile leakage
     addTranscriptTurn("assistant", assistant_text);
   }
 
@@ -1726,8 +1661,6 @@ async function uploadRecordingAndNotify() {
   statusText.textContent = "AI speaking…";
 
   try {
-    // ensure unlocked (in case user resumed from background)
-    await unlockAudioOnce();
     await playWithBargeIn(url, { limitMs: 120000 });
   } catch (e) {
     warn("AI playback failed", e);
@@ -1752,6 +1685,7 @@ let bargeAnalyser = null;
 let bargeRAF = null;
 let bargeTriggered = false;
 
+// ✅ Less sensitive defaults
 const BARGE = {
   THRESH: 12,
   HOLD_MS: 240,
@@ -1760,6 +1694,7 @@ const BARGE = {
 
 function startBargeInMonitor({ ignoreMs = 0 } = {}) {
   stopBargeInMonitor();
+
   if (!navigator.mediaDevices?.getUserMedia) return;
 
   const ignoreUntil = performance.now() + (ignoreMs || 0);
@@ -1777,6 +1712,8 @@ function startBargeInMonitor({ ignoreMs = 0 } = {}) {
       bargeSource.connect(bargeAnalyser);
 
       const data = new Uint8Array(bargeAnalyser.fftSize);
+
+      // ✅ Require consecutive ms above threshold (much less false positives)
       let streakMs = 0;
 
       const loop = () => {
@@ -1834,19 +1771,13 @@ function stopBargeInMonitor() {
 async function playWithBargeIn(src, { limitMs = 60000 } = {}) {
   bargeTriggered = false;
 
-  // ignore first ~450ms so AI audio bleed doesn't trigger barge immediately
+  // ✅ ignore first ~450ms so AI audio bleed doesn't trigger barge immediately
   startBargeInMonitor({ ignoreMs: BARGE.IGNORE_MS });
 
   return new Promise((resolve) => {
-    const a = ensurePlaybackAudioElement();
-    registerAudioElement(a);
-
+    const a = new Audio(src);
     a.preload = "auto";
-    a.src = src;
-    a.playsInline = true;
-    a.muted = speakerMuted;
-    a.volume = speakerMuted ? 0 : 1;
-
+    registerAudioElement(a);
     animateRingFromElement(a, "#d4a373");
 
     let done = false;
@@ -1944,22 +1875,14 @@ async function sendChatToN8N(message) {
 
   prepareGreetingForNextCall();
 
-  // initialize labels
+  // ✅ initialize labels
   if (callLabel) callLabel.textContent = "Start Call";
   if (speakerLabel) speakerLabel.textContent = "Speaker";
 
   resetCallTimer();
-  updateMicUI();
-  updateSpeakerUI();
+  updateMicUI();      // sets Mute/Unmute label
+  updateSpeakerUI();  // sets Speaker label
   updateModeBtnUI();
-
-  // bind speaker state to the single audio element too
-  try {
-    const a = ensurePlaybackAudioElement();
-    a.muted = speakerMuted;
-    a.volume = speakerMuted ? 0 : 1;
-    registerAudioElement(a);
-  } catch {}
 
   renderDebugHud();
 })();
