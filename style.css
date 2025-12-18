@@ -731,7 +731,7 @@ body.chat-app .content {
 }
 
 /* =========================================================
-   CALL: labeled controls (NEW)
+   CALL: labeled controls
    ========================================================= */
 
 .call-controls.labeled {
@@ -773,8 +773,6 @@ body.sow-shell main.content h2.tiny {
   color: var(--text-soft);
 }
 
-/* Conversation list on history.html */
-
 .conv-list {
   margin-top: 0.4rem;
   display: flex;
@@ -782,7 +780,7 @@ body.sow-shell main.content h2.tiny {
   gap: 0.4rem;
 }
 
-/* IMPORTANT: make conv-item work for both <button> and <div> wrappers */
+/* IMPORTANT: keep conversation rows clean and avoid creating stacking bugs */
 .conv-item {
   width: 100%;
   text-align: left;
@@ -797,6 +795,11 @@ body.sow-shell main.content h2.tiny {
   cursor: pointer;
   transition: background 0.16s ease, border-color 0.16s ease,
     transform 0.06s ease, box-shadow 0.16s ease;
+  /* KEY: allow the menu to render above other rows */
+  overflow: visible;
+  /* KEY: do NOT create a new stacking context here */
+  transform: none;
+  position: relative;
 }
 
 .conv-item .title {
@@ -820,25 +823,13 @@ body.sow-shell main.content h2.tiny {
   background: rgba(15, 23, 42, 0.98);
   border-color: var(--accent);
   box-shadow: 0 12px 30px rgba(0, 0, 0, 0.8);
-  transform: translateY(-1px);
+  /* keep it visually lifted without transform (transform creates stacking context) */
+  outline: 1px solid rgba(246, 201, 121, 0.18);
 }
 
-/* =========================================================
-   HISTORY: 3-dot actions + menu
-   ========================================================= */
-
+/* 3-dot actions + menu */
 .conv-item {
-  position: relative;
   padding-right: 3.1rem; /* room for kebab */
-}
-
-.conv-item[role="button"] {
-  cursor: pointer;
-}
-
-.conv-item.is-disabled {
-  opacity: 0.7;
-  pointer-events: none;
 }
 
 .conv-main {
@@ -853,6 +844,8 @@ body.sow-shell main.content h2.tiny {
   display: flex;
   align-items: center;
   gap: 0.35rem;
+  /* Ensure kebab/menu sits above row content */
+  z-index: 5;
 }
 
 .conv-kebab {
@@ -884,6 +877,7 @@ body.sow-shell main.content h2.tiny {
   transform: none;
 }
 
+/* Menu: appears ABOVE other rows */
 .conv-menu {
   position: absolute;
   right: 0;
@@ -891,12 +885,13 @@ body.sow-shell main.content h2.tiny {
   min-width: 160px;
   padding: 0.35rem;
   border-radius: 14px;
-  background: rgba(10, 18, 34, 0.96);
+  background: rgba(10, 18, 34, 0.98);
   border: 1px solid rgba(246, 201, 121, 0.35);
   box-shadow: 0 18px 45px rgba(0, 0, 0, 0.75);
   backdrop-filter: blur(14px);
   display: none;
-  z-index: 60;
+  /* KEY: make sure it paints above other rows */
+  z-index: 9999;
 }
 
 .conv-actions.open .conv-menu {
@@ -929,10 +924,7 @@ body.sow-shell main.content h2.tiny {
   border-color: rgba(248, 113, 113, 0.35);
 }
 
-/* =========================================================
-   HISTORY: inline rename
-   ========================================================= */
-
+/* Inline rename */
 .conv-item .title {
   display: flex;
   align-items: center;
@@ -967,7 +959,11 @@ body.sow-shell main.content h2.tiny {
 .conv-item.renaming {
   border-color: rgba(246, 201, 121, 0.65);
   box-shadow: 0 12px 30px rgba(0, 0, 0, 0.75);
-  transform: none;
+}
+
+.conv-item.is-busy {
+  opacity: 0.7;
+  pointer-events: none;
 }
 
 /* =========================================================
@@ -1034,7 +1030,6 @@ body.sow-shell main.content h2.tiny {
   gap: 0.75rem;
 }
 
-/* Header row */
 .ts-header {
   display: flex;
   align-items: center;
@@ -1063,7 +1058,6 @@ body.sow-shell main.content h2.tiny {
   align-items: center;
 }
 
-/* Back button on transcript page */
 .ts-header .back-btn {
   display: inline-flex;
   align-items: center;
@@ -1083,7 +1077,6 @@ body.sow-shell main.content h2.tiny {
   border-color: var(--accent);
 }
 
-/* LIVE badge */
 .live {
   font-size: 0.7rem;
   padding: 0.16rem 0.5rem;
@@ -1099,7 +1092,6 @@ body.sow-shell main.content h2.tiny {
   box-shadow: 0 0 16px rgba(248, 113, 113, 0.7);
 }
 
-/* Right-side header actions */
 .ts-header .actions {
   display: flex;
   gap: 0.35rem;
@@ -1114,7 +1106,6 @@ body.sow-shell main.content h2.tiny {
   color: var(--text-main);
 }
 
-/* Transcript list */
 .ts-list {
   flex: 1;
   margin-top: 0.5rem;
@@ -1126,7 +1117,6 @@ body.sow-shell main.content h2.tiny {
   overflow-y: auto;
 }
 
-/* Individual turns */
 .turn {
   margin-bottom: 0.65rem;
 }
@@ -1136,7 +1126,6 @@ body.sow-shell main.content h2.tiny {
   max-width: 100%;
 }
 
-/* User vs AI styling for transcript bubbles */
 .turn.user .bubble {
   margin-left: auto;
   background: linear-gradient(135deg, var(--accent), var(--accent-strong));
@@ -1153,7 +1142,6 @@ body.sow-shell main.content h2.tiny {
   border: 1px solid var(--border-subtle);
 }
 
-/* Meta line (role + time) */
 .turn .meta {
   display: flex;
   justify-content: space-between;
@@ -1183,20 +1171,17 @@ body.sow-shell main.content h2.tiny {
   font-variant-numeric: tabular-nums;
 }
 
-/* Text body */
 .turn .text {
   font-size: 0.86rem;
   line-height: 1.45;
   white-space: pre-wrap;
 }
 
-/* Audio player inside transcript bubble */
 .turn audio {
   margin-top: 0.25rem;
   width: 100%;
 }
 
-/* Footer controls */
 .ts-footer {
   margin-top: 0.75rem;
   border-top: 1px solid rgba(148, 163, 184, 0.4);
@@ -1248,7 +1233,6 @@ body.sow-shell main.content h2.tiny {
   color: var(--text-gold);
 }
 
-/* Header title-left + dot for "Live Transcription" */
 .ts-header .title-left {
   display: flex;
   align-items: center;
@@ -1263,7 +1247,6 @@ body.sow-shell main.content h2.tiny {
   box-shadow: 0 0 12px rgba(34, 197, 94, 0.9);
 }
 
-/* Floating auto-scroll toggle button on transcript page */
 .auto-scroll {
   position: fixed;
   right: 1.4rem;
@@ -1294,13 +1277,11 @@ body.sow-shell main.content h2.tiny {
 /* When transcript.html is embedded in the call page */
 body.ts-live.embed .transcript-wrap {
   max-width: none;
-  margin: 0; /* remove outer margin so it fits the iframe */
+  margin: 0;
   padding: 0.75rem 0.9rem 0.9rem;
   border-radius: 18px;
   box-shadow: none;
   border: none;
-
-  /* Make the inner layout fill the iframe so .ts-list can scroll */
   height: 100%;
   min-height: 0;
   display: flex;
@@ -1324,22 +1305,17 @@ body.ts-live.embed .auto-scroll {
   align-items: flex-start;
 }
 
-/* Right-hand transcript panel (inline) */
 .call-side-transcript {
   background: rgba(2, 6, 23, 0.96);
   border-radius: 22px;
   border: 1px solid var(--border-subtle);
   padding: 0.9rem;
   box-shadow: var(--shadow-soft);
-
-  /* default desktop height */
   height: 380px;
-
   display: flex;
   flex-direction: column;
 }
 
-/* Stack vertically on smaller screens & make transcript readable on phones */
 @media (max-width: 900px) {
   .page-call .content.call-layout {
     display: block;
@@ -1361,11 +1337,7 @@ body.ts-live.embed .auto-scroll {
   }
 }
 
-/* =========================================================
-   FIX: Prevent chat bubble styles from affecting transcript turns
-   ========================================================= */
-
-/* 1) Scope the HOME/CHAT bubbles so they don't leak into transcript turns */
+/* FIX: Prevent chat bubble styles from affecting transcript turns */
 .chat-panel .bubble,
 .chat-box .bubble {
   max-width: 80%;
@@ -1377,7 +1349,6 @@ body.ts-live.embed .auto-scroll {
   word-wrap: break-word;
 }
 
-/* If you still use .bubble.user / .bubble.ai on the home page */
 .chat-panel .bubble.user,
 .chat-box .bubble.user {
   margin-left: auto;
@@ -1394,25 +1365,22 @@ body.ts-live.embed .auto-scroll {
   border-bottom-left-radius: 4px;
 }
 
-/* 2) Transcript bubbles: make them deterministic + full-width-friendly */
 .ts-list .turn .bubble {
   max-width: 100%;
-  margin: 0; /* transcript spacing controlled by .turn */
+  margin: 0;
   padding: 0.6rem 0.85rem;
   border-radius: 14px;
   font-size: 0.88rem;
   line-height: 1.45;
 }
 
-/* Ensure transcript body wraps nicely */
 .ts-list .turn .text {
   word-break: break-word;
   overflow-wrap: anywhere;
 }
 
-/* 3) Make call-side transcript panel scroll correctly on mobile */
 .page-call .call-side-transcript {
-  min-height: 0; /* critical for nested flex scrolling */
+  min-height: 0;
 }
 
 .page-call .call-side-transcript .transcript-wrap {
@@ -1422,7 +1390,6 @@ body.ts-live.embed .auto-scroll {
   flex-direction: column;
 }
 
-/* Make the list area always scroll instead of the whole page jittering */
 .page-call .call-side-transcript .ts-list {
   flex: 1;
   min-height: 0;
@@ -1430,7 +1397,6 @@ body.ts-live.embed .auto-scroll {
   -webkit-overflow-scrolling: touch;
 }
 
-/* 4) Optional: tighten meta line on small screens */
 @media (max-width: 480px) {
   .ts-list .turn .meta {
     font-size: 0.72rem;
