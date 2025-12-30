@@ -416,6 +416,13 @@ button:hover:not(:disabled),
   padding: 0.75rem 0.2rem 6.5rem;
 }
 
+/* ✅ SAFARI / MENU FIX — allow dropdown menus to escape stacking contexts */
+.content {
+  overflow: visible;
+  position: relative;
+  z-index: 1;
+}
+
 /* Chat root */
 body.chat-app {
   display: flex;
@@ -774,12 +781,16 @@ body.sow-shell main.content h2.tiny {
 }
 
 /* Conversation list on history.html */
-
 .conv-list {
   margin-top: 0.4rem;
   display: flex;
   flex-direction: column;
   gap: 0.4rem;
+
+  /* ✅ Allow dropdowns to escape list bounds */
+  overflow: visible !important;
+  position: relative;
+  z-index: 1;
 }
 
 /* IMPORTANT: make conv-item work for both <button> and <div> wrappers */
@@ -797,6 +808,17 @@ body.sow-shell main.content h2.tiny {
   cursor: pointer;
   transition: background 0.16s ease, border-color 0.16s ease,
     transform 0.06s ease, box-shadow 0.16s ease;
+
+  /* ✅ Allow dropdown menus to float outside row */
+  overflow: visible !important;
+  position: relative;
+  z-index: 1;
+}
+
+/* ✅ Lift the row above siblings when menu opens */
+.conv-item.menu-open {
+  z-index: 9999 !important;
+  isolation: isolate; /* extra-hardening for Safari/glass stacking */
 }
 
 .conv-item .title {
@@ -824,7 +846,7 @@ body.sow-shell main.content h2.tiny {
 }
 
 /* =========================================================
-   HISTORY: 3-dot actions + menu
+   HISTORY: 3-dot actions + menu (ANIMATED)
    ========================================================= */
 
 .conv-item {
@@ -845,16 +867,24 @@ body.sow-shell main.content h2.tiny {
   width: 100%;
 }
 
+/* ✅ UPDATED: remove transform (stacking context) and center via top/bottom */
 .conv-actions {
   position: absolute;
-  top: 50%;
   right: 0.65rem;
-  transform: translateY(-50%);
+  top: 0.65rem;
+  bottom: 0.65rem;
   display: flex;
-  align-items: center;
+  align-items: center; /* vertical centering without transform */
   gap: 0.35rem;
+  z-index: 10000;
 }
 
+/* ✅ When open, ensure stacking context rises */
+.conv-actions.open {
+  z-index: 99999;
+}
+
+/* Kebab button */
 .conv-kebab {
   width: 2.2rem;
   height: 2.2rem;
@@ -868,6 +898,8 @@ body.sow-shell main.content h2.tiny {
   gap: 3px;
   cursor: pointer;
   padding: 0;
+  transition: border-color 0.18s ease, background 0.18s ease,
+    transform 0.12s ease;
 }
 
 .conv-kebab span {
@@ -881,13 +913,20 @@ body.sow-shell main.content h2.tiny {
 .conv-kebab:hover {
   border-color: rgba(246, 201, 121, 0.65);
   background: rgba(15, 23, 42, 0.95);
-  transform: none;
 }
 
+.conv-actions.open .conv-kebab {
+  border-color: rgba(246, 201, 121, 0.8);
+  box-shadow: 0 0 0 1px rgba(246, 201, 121, 0.35),
+    0 10px 25px rgba(0, 0, 0, 0.75);
+  transform: scale(1.03);
+}
+
+/* ✅ MENU: animated open (UPDATED positioning to avoid stacking weirdness) */
 .conv-menu {
   position: absolute;
   right: 0;
-  top: calc(100% + 8px);
+  top: 50%;
   min-width: 160px;
   padding: 0.35rem;
   border-radius: 14px;
@@ -895,14 +934,28 @@ body.sow-shell main.content h2.tiny {
   border: 1px solid rgba(246, 201, 121, 0.35);
   box-shadow: 0 18px 45px rgba(0, 0, 0, 0.75);
   backdrop-filter: blur(14px);
-  display: none;
-  z-index: 60;
+
+  /* 🔥 animation baseline */
+  opacity: 0;
+  transform: translateY(-10%) scale(0.98);
+  pointer-events: none;
+  visibility: hidden;
+
+  transition: opacity 0.18s ease, transform 0.18s ease,
+    visibility 0.18s ease;
+
+  z-index: 100000 !important;
 }
 
+/* ✅ open state */
 .conv-actions.open .conv-menu {
-  display: block;
+  opacity: 1;
+  transform: translateY(0) scale(1);
+  pointer-events: auto;
+  visibility: visible;
 }
 
+/* Menu items */
 .conv-menu-item {
   width: 100%;
   text-align: left;
@@ -913,11 +966,14 @@ body.sow-shell main.content h2.tiny {
   color: var(--text-main);
   cursor: pointer;
   font-size: 0.82rem;
+  transition: background 0.16s ease, border-color 0.16s ease,
+    transform 0.08s ease;
 }
 
 .conv-menu-item:hover {
   background: rgba(148, 163, 184, 0.14);
   border-color: rgba(148, 163, 184, 0.3);
+  transform: translateX(1px);
 }
 
 .conv-menu-item.danger {

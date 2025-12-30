@@ -1,13 +1,11 @@
 // app/history.js
-// Conversation history page controller
-// FIXED: no nested <button> (row is now a <div role="button">)
-// Adds per-conversation 3-dot menu + delete flow + inline rename
+// Conversation history page controller — patched for kebab menu + rename/delete + animated open
 
 import { supabase, ensureAuthedOrRedirect } from "./supabase.js";
 
 const $ = (s, r = document) => r.querySelector(s);
 
-// Main list container (support either #list or #conversation-list)
+// Main list container
 const listEl =
   $("#list") ||
   $("#conversation-list") ||
@@ -19,18 +17,13 @@ const listEl =
   })();
 
 // Template
-const itemTpl = $("#conv-item-template");
+const template = $("#conv-item-template");
 
 // Query params
 const params = new URLSearchParams(window.location.search);
 const returnTo = params.get("returnTo") || "home.html";
 
 // --- helpers -----------------------------------------------------------
-
-function initialFromEmail(email = "") {
-  const c = (email || "?").trim()[0] || "?";
-  return c.toUpperCase();
-}
 
 function convUrl(id) {
   const q = new URLSearchParams({ c: id }).toString();
@@ -44,15 +37,6 @@ function formatDate(ts) {
     month: "long",
     day: "numeric",
   });
-}
-
-function normalizeTitle(s) {
-  return (s || "").replace(/\s+/g, " ").trim();
-}
-
-function isUntitled(title) {
-  const t = normalizeTitle(title).toLowerCase();
-  return !t || t === "untitled" || t === "new conversation";
 }
 
 async function getConvosFromSupabase(userId) {
@@ -76,296 +60,6 @@ async function getConvosFromSupabase(userId) {
   }));
 }
 
-function closeAllMenus(exceptEl = null) {
-  document.querySelectorAll(".conv-actions.open").forEach((el) => {
-    if (exceptEl && el === exceptEl) return;
-    el.classList.remove("open");
-    const menu = el.querySelector(".conv-menu");
-    if (menu) menu.setAttribute("aria-hidden", "true");
-  });
-}
-
-function toggleMenu(actionsEl) {
-  const isOpen = actionsEl.classList.contains("open");
-  if (isOpen) {
-    actionsEl.classList.remove("open");
-    const menu = actionsEl.querySelector(".conv-menu");
-    if (menu) menu.setAttribute("aria-hidden", "true");
-  } else {
-    closeAllMenus(actionsEl);
-    actionsEl.classList.add("open");
-    const menu = actionsEl.querySelector(".conv-menu");
-    if (menu) menu.setAttribute("aria-hidden", "false");
-  }
-}
-
-async function deleteConversation(convId) {
-  // Safe path if FK does not cascade:
-  const { error: msgErr } = await supabase
-    .from("conversation_messages")
-    .delete()
-    .eq("conversation_id", convId);
-
-  if (msgErr) console.warn("[HISTORY] message delete warning:", msgErr);
-
-  const { error: convErr } = await supabase
-    .from("conversations")
-    .delete()
-    .eq("id", convId);
-
-  if (convErr) throw convErr;
-}
-
-async function renameConversation(convId, newTitle) {
-  const title = normalizeTitle(newTitle);
-  const finalTitle = title || "Untitled";
-
-  const { error } = await supabase
-    .from("conversations")
-    .update({
-      title: finalTitle,
-      updated_at: new Date().toISOString(),
-    })
-    .eq("id", convId);
-
-  if (error) throw error;
-  return finalTitle;
-}
-
-function showEmptyStateIfNeeded() {
-  const remaining =
-    listEl?.querySelectorAll(".conv-item:not(.empty)")?.length || 0;
-  if (remaining === 0) {
-    const empty = document.createElement("div");
-    empty.className = "conv-item empty";
-    empty.textContent = "No conversations yet. Tap “New Conversation” to start.";
-    listEl?.appendChild(empty);
-  }
-}
-
-function beginInlineRename(rowEl, conv) {
-  if (!rowEl) return;
-
-  closeAllMenus();
-
-  const titleTextEl = rowEl.querySelector(".title-text");
-  const titleEditEl = rowEl.querySelector(".title-edit");
-
-  if (!titleTextEl || !titleEditEl) {
-    alert("Rename UI missing. Please update history.html template.");
-    return;
-  }
-
-  rowEl.classList.add("renaming");
-
-  const current = normalizeTitle(conv.title);
-  titleEditEl.value = isUntitled(current) ? "" : current;
-
-  titleEditEl.focus();
-  titleEditEl.select();
-
-  let committed = false;
-
-  const cleanup = () => {
-    rowEl.classList.remove("renaming");
-    titleEditEl.removeEventListener("keydown", onKeyDown);
-    titleEditEl.removeEventListener("blur", onBlur);
-    titleEditEl.disabled = false;
-  };
-
-  const commit = async () => {
-    if (committed) return;
-    committed = true;
-
-    const nextTitle = normalizeTitle(titleEditEl.value);
-    const originalTitle = conv.title || "Untitled";
-
-    if (normalizeTitle(nextTitle) === normalizeTitle(originalTitle)) {
-      cleanup();
-      return;
-    }
-
-    titleTextEl.textContent = nextTitle || "Untitled";
-    conv.title = nextTitle || "Untitled";
-
-    titleEditEl.disabled = true;
-
-    try {
-      const saved = await renameConversation(conv.id, nextTitle);
-      conv.title = saved;
-      titleTextEl.textContent = saved;
-      cleanup();
-    } catch (err) {
-      console.error("[HISTORY] rename failed:", err);
-      alert("Could not rename conversation. Please try again.");
-
-      conv.title = originalTitle;
-      titleTextEl.textContent = originalTitle || "Untitled";
-
-      committed = false;
-      titleEditEl.disabled = false;
-      titleEditEl.focus();
-      titleEditEl.select();
-    }
-  };
-
-  const cancel = () => {
-    if (committed) return;
-    committed = true;
-    cleanup();
-  };
-
-  const onKeyDown = async (e) => {
-    e.stopPropagation();
-    if (e.key === "Enter") {
-      e.preventDefault();
-      await commit();
-    } else if (e.key === "Escape") {
-      e.preventDefault();
-      cancel();
-    }
-  };
-
-  const onBlur = async () => {
-    await commit();
-  };
-
-  titleEditEl.addEventListener("keydown", onKeyDown);
-  titleEditEl.addEventListener("blur", onBlur);
-}
-
-function makeConvRow(c) {
-  let el;
-
-  // Prefer template if present
-  if (itemTpl?.content?.firstElementChild) {
-    el = itemTpl.content.firstElementChild.cloneNode(true);
-  } else {
-    // Fallback (div, not button)
-    el = document.createElement("div");
-    el.className = "conv-item";
-    el.setAttribute("role", "button");
-    el.setAttribute("tabindex", "0");
-    el.innerHTML = `
-      <div class="conv-main">
-        <div class="title">
-          <span class="title-text"></span>
-          <input class="title-edit" type="text" aria-label="Rename conversation" />
-        </div>
-        <div class="date tiny muted"></div>
-      </div>
-
-      <div class="conv-actions">
-        <button class="conv-kebab" type="button" aria-label="Conversation options">
-          <span></span><span></span><span></span>
-        </button>
-
-        <div class="conv-menu" role="menu" aria-hidden="true">
-          <button class="conv-menu-item" type="button" data-action="rename" role="menuitem">
-            Rename
-          </button>
-          <button class="conv-menu-item danger" type="button" data-action="delete" role="menuitem">
-            Delete
-          </button>
-        </div>
-      </div>
-    `;
-  }
-
-  el.dataset.convId = c.id;
-
-  const titleTextEl = el.querySelector(".title-text");
-  const dateEl = el.querySelector(".date");
-  if (titleTextEl) titleTextEl.textContent = c.title || "Untitled";
-  if (dateEl) dateEl.textContent = formatDate(c.updated_at);
-
-  const navigate = () => {
-    if (el.classList.contains("renaming")) return;
-    if (el.classList.contains("is-disabled")) return;
-    window.location.href = convUrl(c.id);
-  };
-
-  // Click row navigates
-  el.addEventListener("click", navigate);
-
-  // Keyboard access (Enter/Space)
-  el.addEventListener("keydown", (e) => {
-    if (e.key === "Enter" || e.key === " ") {
-      e.preventDefault();
-      navigate();
-    }
-  });
-
-  const actions = el.querySelector(".conv-actions");
-  const kebab = el.querySelector(".conv-kebab");
-  const menu = el.querySelector(".conv-menu");
-
-  kebab?.addEventListener("click", (e) => {
-    e.preventDefault();
-    e.stopPropagation();
-    if (actions) toggleMenu(actions);
-  });
-
-  menu?.addEventListener("click", async (e) => {
-    e.preventDefault();
-    e.stopPropagation();
-
-    const btn = e.target.closest("[data-action]");
-    if (!btn) return;
-
-    const action = btn.getAttribute("data-action");
-
-    actions?.classList.remove("open");
-    menu?.setAttribute("aria-hidden", "true");
-
-    if (action === "rename") {
-      beginInlineRename(el, c);
-      return;
-    }
-
-    if (action === "delete") {
-      const ok = confirm("Delete this conversation? This cannot be undone.");
-      if (!ok) return;
-
-      // optimistic UI
-      el.classList.add("is-disabled");
-
-      try {
-        await deleteConversation(c.id);
-        el.remove();
-        showEmptyStateIfNeeded();
-      } catch (err) {
-        console.error("[HISTORY] delete failed:", err);
-        alert("Could not delete conversation. Please try again.");
-        el.classList.remove("is-disabled");
-      }
-    }
-  });
-
-  el.querySelector(".title-edit")?.addEventListener("click", (e) => {
-    e.stopPropagation();
-  });
-
-  return el;
-}
-
-function renderConvos(convos) {
-  if (!listEl) return;
-  listEl.innerHTML = "";
-
-  if (!convos || convos.length === 0) {
-    const empty = document.createElement("div");
-    empty.className = "conv-item empty";
-    empty.textContent = "No conversations yet. Tap “New Conversation” to start.";
-    listEl.appendChild(empty);
-    return;
-  }
-
-  for (const c of convos) {
-    listEl.appendChild(makeConvRow(c));
-  }
-}
-
 async function createConversation(userId) {
   if (!userId) return null;
 
@@ -385,21 +79,215 @@ async function createConversation(userId) {
   }
 }
 
-// --- global menu dismissal ---------------------------------------------
+async function renameConversation(id, newTitle) {
+  if (!id) return false;
+  try {
+    const { error } = await supabase
+      .from("conversations")
+      .update({ title: newTitle, updated_at: new Date().toISOString() })
+      .eq("id", id);
 
-document.addEventListener(
-  "click",
-  () => closeAllMenus(),
-  { capture: true }
-);
+    if (error) throw error;
+    return true;
+  } catch (e) {
+    console.error("[HISTORY] rename failed:", e);
+    return false;
+  }
+}
 
-document.addEventListener(
-  "keydown",
-  (e) => {
-    if (e.key === "Escape") closeAllMenus();
-  },
-  { capture: true }
-);
+async function deleteConversation(id) {
+  if (!id) return false;
+  try {
+    const { error } = await supabase.from("conversations").delete().eq("id", id);
+    if (error) throw error;
+    return true;
+  } catch (e) {
+    console.error("[HISTORY] delete failed:", e);
+    return false;
+  }
+}
+
+// --- menu behavior -----------------------------------------------------
+
+function closeAllMenus() {
+  document.querySelectorAll(".conv-actions.open").forEach((actions) => {
+    actions.classList.remove("open");
+
+    const menu = actions.querySelector(".conv-menu");
+    const kebab = actions.querySelector(".conv-kebab");
+    const item = actions.closest(".conv-item");
+
+    if (menu) menu.setAttribute("aria-hidden", "true");
+    if (kebab) kebab.setAttribute("aria-expanded", "false");
+    if (item) item.classList.remove("menu-open");
+  });
+}
+
+// Close menus on outside click
+document.addEventListener("click", (e) => {
+  if (!e.target.closest(".conv-actions")) closeAllMenus();
+});
+
+// Close menus on Escape
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") closeAllMenus();
+});
+
+// Close menus when list scrolls (prevents float overlaps)
+listEl?.addEventListener("scroll", () => closeAllMenus(), { passive: true });
+
+// Close menus on resize (prevents weird alignment on mobile rotation)
+window.addEventListener("resize", () => closeAllMenus());
+
+// --- render ------------------------------------------------------------
+
+function renderEmptyState() {
+  if (!listEl) return;
+  listEl.innerHTML = "";
+
+  const empty = document.createElement("div");
+  empty.className = "conv-item empty";
+  empty.textContent = "No conversations yet. Tap “New Conversation” to start.";
+  listEl.appendChild(empty);
+}
+
+function renderConvos(convos) {
+  if (!listEl) return;
+  listEl.innerHTML = "";
+
+  if (!convos || convos.length === 0) {
+    renderEmptyState();
+    return;
+  }
+
+  for (const c of convos) {
+    const node = template?.content
+      ? template.content.firstElementChild.cloneNode(true)
+      : document.createElement("div");
+
+    // Ensure consistent base
+    node.classList.add("conv-item");
+    node.dataset.convId = c.id;
+    node.setAttribute("data-conv-id", c.id);
+
+    const titleText = node.querySelector(".title-text");
+    const titleEdit = node.querySelector(".title-edit");
+    const dateEl = node.querySelector(".date");
+    const kebabBtn = node.querySelector(".conv-kebab");
+    const menu = node.querySelector(".conv-menu");
+    const actions = node.querySelector(".conv-actions");
+
+    // Title + date
+    if (titleText) titleText.textContent = c.title || "Untitled";
+    if (titleEdit) titleEdit.value = c.title || "Untitled";
+    if (dateEl) dateEl.textContent = formatDate(c.updated_at);
+
+    // Ensure accessible defaults
+    if (menu) menu.setAttribute("aria-hidden", "true");
+    if (kebabBtn) kebabBtn.setAttribute("aria-expanded", "false");
+
+    // Clicking row opens conversation (unless renaming or clicking actions)
+    node.addEventListener("click", (e) => {
+      if (node.classList.contains("renaming")) return;
+      if (e.target.closest(".conv-actions")) return;
+      if (e.target.closest("input")) return;
+      window.location.href = convUrl(c.id);
+    });
+
+    // Kebab open/close
+    kebabBtn?.addEventListener("click", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+
+      const isOpen = actions?.classList.contains("open");
+      closeAllMenus();
+
+      if (!isOpen) {
+        actions?.classList.add("open");
+        node.classList.add("menu-open"); // lifts row above others
+        menu?.setAttribute("aria-hidden", "false");
+        kebabBtn?.setAttribute("aria-expanded", "true");
+      } else {
+        actions?.classList.remove("open");
+        node.classList.remove("menu-open");
+        menu?.setAttribute("aria-hidden", "true");
+        kebabBtn?.setAttribute("aria-expanded", "false");
+      }
+    });
+
+    // Menu actions (rename/delete)
+    menu?.addEventListener("click", async (e) => {
+      const btn = e.target.closest("button[data-action]");
+      if (!btn) return;
+
+      e.preventDefault();
+      e.stopPropagation();
+
+      const action = btn.dataset.action;
+
+      if (action === "rename") {
+        closeAllMenus();
+        node.classList.add("renaming");
+
+        // Delay focus slightly to avoid Safari glitch
+        setTimeout(() => {
+          titleEdit?.focus();
+          titleEdit?.select();
+        }, 0);
+      }
+
+      if (action === "delete") {
+        closeAllMenus();
+
+        const ok = confirm("Delete this conversation?");
+        if (!ok) return;
+
+        const success = await deleteConversation(c.id);
+        if (success) {
+          node.remove();
+
+          // If list is empty after deletion, show empty state
+          if (!listEl.querySelector(".conv-item:not(.empty)")) {
+            renderEmptyState();
+          }
+        }
+      }
+    });
+
+    // Rename commit (enter / escape)
+    titleEdit?.addEventListener("keydown", async (e) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        titleEdit.blur();
+      }
+
+      if (e.key === "Escape") {
+        e.preventDefault();
+        node.classList.remove("renaming");
+        titleEdit.value = titleText?.textContent || "Untitled";
+        titleEdit.blur();
+      }
+    });
+
+    // Rename commit on blur
+    titleEdit?.addEventListener("blur", async () => {
+      if (!node.classList.contains("renaming")) return;
+
+      const newTitle = (titleEdit.value || "").trim() || "Untitled";
+
+      // Only update if changed
+      if (newTitle !== (titleText?.textContent || "").trim()) {
+        const ok = await renameConversation(c.id, newTitle);
+        if (ok && titleText) titleText.textContent = newTitle;
+        if (!ok) titleEdit.value = titleText?.textContent || "Untitled";
+      }
+
+      node.classList.remove("renaming");
+    });
+
+    listEl.appendChild(node);
+  }
+}
 
 // --- event bindings ----------------------------------------------------
 

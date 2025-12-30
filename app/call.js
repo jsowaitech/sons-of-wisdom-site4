@@ -1,40 +1,51 @@
 // app/call.js
 // Son of Wisdom — Call mode
-// Voice call + inline transcript
+// - Continuous VAD recording → Supabase (optional) → Netlify coach function → AI audio reply
+// - Web Speech API captions + optional Hume realtime (safely stubbed)
+// - Dynamic AI greeting audio via Netlify function + ElevenLabs
+// - Conversation thread awareness + auto-title from first transcript
 //
-// ✅ Desktop: Web Speech API (live captions) - unchanged
-// ✅ Mobile: OpenAI Whisper (whisper-1) via Netlify function (turn-based, after MediaRecorder stops)
+// ✅ PATCH (iPhone Safari TTS reliability):
+//    - Single persistent audio element (ttsPlayer)
+//    - unlockAudioSystem() runs on Start Call tap (gesture bound)
+//    - All playback routes through shared player
+//    - AudioContext resume + "silent unlock" for iOS
+//    - Adds play retry + forced re-resume before each AI playback
 //
-// Requires:
-// - Netlify function: /.netlify/functions/openai-transcribe  (returns { text })
-// - Netlify function: /.netlify/functions/call-coach
-// - Netlify function: /.netlify/functions/call-greeting
-
-import { supabase } from "./supabase.js";
+// ✅ PATCH (Remove n8n):
+//    - Calls /.netlify/functions/call-coach for voice + chat responses
+//    - Expects JSON: { text, audio_base64, mime }
+//    - Converts base64 to Blob URL and plays via shared player
 
 /* ---------- CONFIG ---------- */
 const DEBUG = true;
-const DEBUG_HUD = true;
 
 /* Optional: Hume realtime SDK (safe stub if not loaded) */
-const HumeRealtime = window.HumeRealtime ?? {
+const HumeRealtime = (window.HumeRealtime ?? {
   init() {},
   startTurn() {},
   handleRecorderChunk() {},
   stopTurn() {},
-};
+});
 HumeRealtime.init?.({ enable: false });
 
 /* ---------- Supabase (OPTIONAL) ---------- */
+/**
+ * In local dev you can inject:
+ *   window.SUPABASE_SERVICE_ROLE_KEY = "....";
+ * For production we recommend proxying through a secure backend instead of
+ * exposing a service role key to the browser.
+ */
 const SUPABASE_URL = "https://plrobtlpedniyvkpwdmp.supabase.co";
 const SUPABASE_SERVICE_ROLE_KEY = window.SUPABASE_SERVICE_ROLE_KEY || "";
-const HAS_SUPABASE = Boolean(SUPABASE_URL) && Boolean(SUPABASE_SERVICE_ROLE_KEY);
+const HAS_SUPABASE =
+  Boolean(SUPABASE_URL) && Boolean(SUPABASE_SERVICE_ROLE_KEY);
 
 // Storage
 const SUPABASE_BUCKET = "audiossow";
 const RECORDINGS_FOLDER = "recordings";
 
-// REST (history/summary)
+// REST (history/summary/threads)
 const SUPABASE_REST = `${SUPABASE_URL}/rest/v1`;
 const HISTORY_TABLE = "call_sessions";
 const HISTORY_USER_COL = "user_id_uuid";
@@ -44,42 +55,29 @@ const HISTORY_TIME_COL = "timestamp";
 const SUMMARY_TABLE = "history_summaries";
 const SUMMARY_MAX_CHARS = 380;
 
-/* ---------- n8n webhooks / Netlify endpoints ---------- */
-const N8N_WEBHOOK_URL =
-  "https://jsonofwisdom.app.n8n.cloud/webhook/4877ebea-544b-42b4-96d6-df41c58d48b0";
+const CONVERSATIONS_TABLE = "conversations";
 
-const N8N_TRANSCRIBE_URL = "";
+/* ---------- Coach workflow endpoint (Netlify) ---------- */
+const WORKFLOW_ENDPOINT = "/.netlify/functions/call-coach";
 
-const CALL_COACH_ENDPOINT = "/.netlify/functions/call-coach";
+/* ---------- Netlify / ElevenLabs greeting ---------- */
 const GREETING_ENDPOINT = "/.netlify/functions/call-greeting";
-
-// ✅ OpenAI Whisper transcription (mobile)
-const OPENAI_TRANSCRIBE_ENDPOINT = "/.netlify/functions/openai-transcribe";
 
 /* ---------- I/O settings ---------- */
 const ENABLE_MEDIARECORDER_64KBPS = true;
 const TIMESLICE_MS = 100;
-
-const IS_MOBILE = /Mobi|Android|iPhone|iPad/i.test(navigator.userAgent || "");
-const ENABLE_STREAMED_PLAYBACK = !IS_MOBILE;
+const ENABLE_STREAMED_PLAYBACK = false; // not supported by call-coach.js (JSON)
+const ENABLE_SYSTEM_NO_RESPONSE = true;
 
 /* ---------- USER / DEVICE ---------- */
 const USER_ID_KEY = "sow_user_id";
 const DEVICE_ID_KEY = "sow_device_id";
 const SENTINEL_UUID = "00000000-0000-0000-0000-000000000000";
 
-/** the current call session id (used for transcript mode) */
-let currentCallId = null;
-
 const isUuid = (v) =>
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
     v || ""
   );
-
-/* ---------- Conversation thread (from ?c=...) ---------- */
-const urlParams = new URLSearchParams(window.location.search);
-const conversationId = urlParams.get("c") || null;
-let conversationTitleLocked = false;
 
 function getOrCreateDeviceId() {
   let id = localStorage.getItem(DEVICE_ID_KEY);
@@ -96,6 +94,7 @@ function getUserIdForWebhook() {
   return localStorage.getItem(USER_ID_KEY) || getOrCreateDeviceId();
 }
 
+// For history/summary — if we don't have a valid UUID, collapse into sentinel.
 const USER_UUID_OVERRIDE = null;
 const pickUuidForHistory = (user_id) =>
   USER_UUID_OVERRIDE && isUuid(USER_UUID_OVERRIDE)
@@ -104,27 +103,168 @@ const pickUuidForHistory = (user_id) =>
     ? user_id
     : SENTINEL_UUID;
 
+/* ---------- Conversation / thread metadata ---------- */
+
+// ?c=<conversation_id> from home.html
+const urlParams = new URLSearchParams(window.location.search);
+const conversationId = urlParams.get("c") || null;
+
+// Local cache of conversation title + flags
+let convTitleCached = null;
+let convMetaLoaded = false;
+let hasAppliedTitleFromCall = false;
+
+function loadLocalConvos() {
+  try {
+    const raw = localStorage.getItem("convos") || "[]";
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveLocalConvos(convos) {
+  try {
+    localStorage.setItem("convos", JSON.stringify(convos));
+  } catch {
+    // ignore
+  }
+}
+
+function touchLocalConversationFromCall(newTitle) {
+  if (!conversationId) return;
+  const convos = loadLocalConvos();
+  const nowIso = new Date().toISOString();
+  const idx = convos.findIndex((c) => c.id === conversationId);
+  if (idx >= 0) {
+    convos[idx].updated_at = nowIso;
+    if (newTitle) convos[idx].title = newTitle;
+  } else {
+    convos.unshift({
+      id: conversationId,
+      title: newTitle || "New Conversation",
+      updated_at: nowIso,
+    });
+  }
+  saveLocalConvos(convos);
+}
+
+async function ensureConversationMetaLoaded() {
+  if (!HAS_SUPABASE || !conversationId || convMetaLoaded) return;
+  try {
+    const url = new URL(
+      `${SUPABASE_REST}/${encodeURIComponent(CONVERSATIONS_TABLE)}`
+    );
+    url.searchParams.set("select", "title");
+    url.searchParams.set("id", `eq.${conversationId}`);
+    url.searchParams.set("limit", "1");
+    const resp = await fetch(url, {
+      headers: {
+        apikey: SUPABASE_SERVICE_ROLE_KEY,
+        Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
+      },
+    });
+    if (!resp.ok) {
+      convMetaLoaded = true;
+      return;
+    }
+    const rows = await resp.json();
+    convTitleCached = rows?.[0]?.title || "New Conversation";
+    convMetaLoaded = true;
+  } catch (e) {
+    console.warn("[CALL] ensureConversationMetaLoaded failed:", e);
+    convMetaLoaded = true;
+  }
+}
+
+/**
+ * Update conversations.updated_at, and if the thread is still untitled,
+ * use the first voice transcript as its title.
+ */
+async function updateConversationFromCall(transcript) {
+  if (!conversationId || !transcript) return;
+
+  const raw = transcript.replace(/\s+/g, " ").trim();
+  if (!raw) return;
+
+  const maxLen = 80;
+  let candidate = raw;
+  if (candidate.length > maxLen) {
+    candidate = candidate.slice(0, maxLen - 1).trimEnd() + "…";
+  }
+
+  // Always keep local history fresh, even if Supabase is disabled.
+  if (!HAS_SUPABASE || !SUPABASE_SERVICE_ROLE_KEY) {
+    touchLocalConversationFromCall(candidate);
+    return;
+  }
+
+  await ensureConversationMetaLoaded();
+
+  const current = (convTitleCached || "").trim();
+  let shouldUpdateTitle = false;
+
+  if (!hasAppliedTitleFromCall) {
+    if (
+      !current ||
+      current.toLowerCase() === "new conversation" ||
+      current.toLowerCase().startsWith("untitled")
+    ) {
+      shouldUpdateTitle = true;
+    }
+  }
+
+  const nowIso = new Date().toISOString();
+  const payload = { updated_at: nowIso };
+  if (shouldUpdateTitle) payload.title = candidate;
+
+  try {
+    const url = new URL(
+      `${SUPABASE_REST}/${encodeURIComponent(CONVERSATIONS_TABLE)}`
+    );
+    url.searchParams.set("id", `eq.${conversationId}`);
+    const resp = await fetch(url.toString(), {
+      method: "PATCH",
+      headers: {
+        apikey: SUPABASE_SERVICE_ROLE_KEY,
+        Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
+        "Content-Type": "application/json",
+        Prefer: "return=minimal",
+      },
+      body: JSON.stringify(payload),
+    });
+
+    if (!resp.ok) {
+      console.warn(
+        "[CALL] conversations update failed:",
+        resp.status,
+        resp.statusText
+      );
+    } else {
+      if (shouldUpdateTitle) {
+        convTitleCached = candidate;
+        hasAppliedTitleFromCall = true;
+      }
+      touchLocalConversationFromCall(shouldUpdateTitle ? candidate : null);
+    }
+  } catch (e) {
+    console.warn("[CALL] conversations update error:", e);
+  }
+}
+
 /* ---------- DOM ---------- */
 const callBtn = document.getElementById("call-btn");
 const statusText = document.getElementById("status-text");
-const callTimerEl = document.getElementById("call-timer");
 const voiceRing = document.getElementById("voiceRing");
 const micBtn = document.getElementById("mic-btn");
 const speakerBtn = document.getElementById("speaker-btn");
 const modeBtn = document.getElementById("mode-btn");
-const threadLink =
-  document.getElementById("thread-link") || document.getElementById("btn-thread");
+const returnLink = document.getElementById("return-thread-link");
 
-// ✅ Control labels (added)
-const callLabel = document.getElementById("call-label");
-const micLabel = document.getElementById("mic-label");
-const speakerLabel = document.getElementById("speaker-label");
-
-// ✅ Inline transcript panel (ONLY these)
-const transcriptListEl = document.getElementById("transcriptList");
-const transcriptInterimEl = document.getElementById("transcriptInterim");
-const tsClearBtn = document.getElementById("ts-clear");
-const tsAutoScrollBtn = document.getElementById("ts-autoscroll");
+// Transcript (call view)
+const transcriptList = document.getElementById("transcript-list");
+const transcriptInterim = document.getElementById("transcript-interim");
 
 // Chat (created lazily)
 let chatPanel = document.getElementById("chat-panel");
@@ -132,19 +272,32 @@ let chatLog;
 let chatForm;
 let chatInput;
 
+/* Wire "Return to this conversation" link */
+if (returnLink) {
+  if (conversationId) {
+    const url = new URL("home.html", window.location.origin);
+    url.searchParams.set("c", conversationId);
+    returnLink.href = url.toString();
+    returnLink.style.display = "inline-flex";
+  } else {
+    // No thread attached – hide link
+    returnLink.style.display = "none";
+  }
+}
+
 /* ---------- State ---------- */
 let isCalling = false;
 let isRecording = false;
 let isPlayingAI = false;
+let inChatView = false;
 
-let callStartedAt = null;
-let callTimerInterval = null;
-
-let globalStream = null; // reused for whole call
+let globalStream = null;
 let mediaRecorder = null;
 let recordChunks = [];
 
-/* Native ASR for desktop live captions */
+/* Native ASR for user live captions */
+const HAS_NATIVE_ASR =
+  "SpeechRecognition" in window || "webkitSpeechRecognition" in window;
 let speechRecognizer = null;
 
 /* Audio routing */
@@ -154,396 +307,178 @@ let preferredOutputDeviceId = null;
 let micMuted = false;
 let speakerMuted = false;
 
-/* Greeting prefetch */
+/* Greeting prefetch state */
 let greetingReadyPromise = null;
-let greetingPayload = null;
 let greetingAudioUrl = null;
 
-/* ---------- Idle detection ---------- */
-const NO_RESPONSE = {
-  FIRST_NUDGE_MS: 20_000,
-  END_CALL_MS: 20_000,
-  ARM_DELAY_MS: 600,
-};
+/* Call identity */
+let currentCallId = null;
 
-let idleArmed = false;
-let idleStep = 0;
-let idleTimer1 = null;
-let idleTimer2 = null;
-let lastUserActivityAt = Date.now();
-let lastAIFinishedAt = 0;
-let idleInFlight = false;
-
-/* ---------- INLINE TRANSCRIPT: UI + helpers ---------- */
-let autoScrollOn = true;
-let lastFinalLine = "";
-
+/* ---------- Helpers ---------- */
 const log = (...a) => DEBUG && console.log("[SOW]", ...a);
 const warn = (...a) => DEBUG && console.warn("[SOW]", ...a);
 const trimText = (s, n = 360) => (s || "").trim().slice(0, n);
 
-/* ---------- Debug HUD (UI overlay) ---------- */
-function renderDebugHud() {
-  if (!DEBUG_HUD) return;
-  let el = document.getElementById("sow-debug-hud");
-  if (!el) {
-    el = document.createElement("div");
-    el.id = "sow-debug-hud";
-    el.style.cssText = `
-      position: fixed; z-index: 999999;
-      left: 10px; right: 10px; bottom: 10px;
-      padding: 10px 12px;
-      background: rgba(0,0,0,.78);
-      color: #fff;
-      font: 12px/1.35 system-ui, -apple-system, Segoe UI, Roboto, Arial;
-      border-radius: 10px;
-      white-space: pre-wrap;
-      word-break: break-word;
-      max-height: 35vh;
-      overflow: auto;
-    `;
-    document.body.appendChild(el);
-  }
+/* =========================================================
+   ✅ iPhone Safari Audio Fix — Shared Audio + Unlock
+   ========================================================= */
 
-  const lines = [
-    `Mobile: ${IS_MOBILE}`,
-    `Transcriber: ${IS_MOBILE ? "OpenAI whisper-1" : "Web Speech API"}`,
-    `WSR status: ${window.__SOW_WSR_STATUS || ""}`,
-    `Last msg: ${window.__SOW_LASTMSG || ""}`,
-    `Last err: ${window.__SOW_LASTERR || ""}`,
-  ].filter(Boolean);
+const IS_IOS =
+  /iPad|iPhone|iPod/i.test(navigator.userAgent || "") ||
+  (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
 
-  el.textContent = lines.join("\n");
+let ttsPlayer = null;
+let audioUnlocked = false;
+
+/** Ensure shared audio element exists */
+function ensureSharedAudio() {
+  if (ttsPlayer) return ttsPlayer;
+  ttsPlayer = new Audio();
+  ttsPlayer.preload = "auto";
+  ttsPlayer.playsInline = true; // important for iOS Safari
+  ttsPlayer.crossOrigin = "anonymous";
+  registerAudioElement(ttsPlayer);
+  return ttsPlayer;
 }
 
-function hudStatus(s) {
-  window.__SOW_WSR_STATUS = String(s || "");
-  renderDebugHud();
-}
-function hudErr(e) {
-  window.__SOW_LASTERR = String(e || "");
-  renderDebugHud();
-}
-function hudMsg(m) {
-  window.__SOW_LASTMSG = String(m || "");
-  renderDebugHud();
-}
-
-function nowHHMM() {
+/** Unlock audio system — must be called from a user gesture on iOS */
+async function unlockAudioSystem() {
   try {
-    return new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-  } catch {
-    return "";
-  }
-}
+    ensureSharedAudio();
 
-function scrollTranscriptToBottom() {
-  if (!autoScrollOn) return;
-  if (!transcriptListEl) return;
-
-  const scroller =
-    transcriptListEl.closest(".ts-list") ||
-    transcriptListEl.closest(".call-side-transcript") ||
-    transcriptListEl;
-
-  try {
-    scroller.scrollTop = scroller.scrollHeight;
-  } catch {}
-}
-
-function setAutoScroll(on) {
-  autoScrollOn = !!on;
-  if (tsAutoScrollBtn) {
-    tsAutoScrollBtn.setAttribute("aria-pressed", String(autoScrollOn));
-    tsAutoScrollBtn.textContent = autoScrollOn ? "On" : "Off";
-  }
-  if (autoScrollOn) scrollTranscriptToBottom();
-}
-
-function ensureTranscriptElementsExist() {
-  if (!transcriptListEl || !transcriptInterimEl) {
-    warn("Transcript elements not found. Check call.html ids: transcriptList/transcriptInterim.");
-  }
-}
-
-function addTranscriptTurn(speaker, text) {
-  const s = (text || "").trim();
-  if (!s || !transcriptListEl) return;
-
-  const turn = document.createElement("div");
-  turn.className = `turn ${speaker === "assistant" ? "assistant" : "user"}`;
-
-  const meta = document.createElement("div");
-  meta.className = "meta";
-
-  const role = document.createElement("span");
-  role.className = "role";
-  role.textContent = speaker === "assistant" ? "BLAKE" : "YOU";
-
-  const time = document.createElement("span");
-  time.className = "time";
-  time.textContent = nowHHMM();
-
-  meta.appendChild(role);
-  meta.appendChild(time);
-
-  const bubble = document.createElement("div");
-  bubble.className = "bubble";
-
-  const body = document.createElement("div");
-  body.className = "text";
-  body.textContent = s;
-
-  bubble.appendChild(body);
-  turn.appendChild(meta);
-  turn.appendChild(bubble);
-
-  transcriptListEl.appendChild(turn);
-  scrollTranscriptToBottom();
-}
-
-function setTranscriptInterim(_speaker, text) {
-  if (!transcriptInterimEl) return;
-  const t = (text || "").trim();
-  transcriptInterimEl.textContent = t ? t : "";
-  if (t) scrollTranscriptToBottom();
-}
-
-/* ---------- Idle detection helpers ---------- */
-function noteUserActivity() {
-  lastUserActivityAt = Date.now();
-  cancelIdleTimers();
-  idleArmed = false;
-  idleStep = 0;
-}
-
-function cancelIdleTimers() {
-  if (idleTimer1) clearTimeout(idleTimer1);
-  if (idleTimer2) clearTimeout(idleTimer2);
-  idleTimer1 = idleTimer2 = null;
-}
-
-function armIdleAfterAI() {
-  cancelIdleTimers();
-  idleArmed = true;
-  idleStep = 0;
-  idleTimer1 = setTimeout(() => maybeRunNoResponseNudge(), NO_RESPONSE.FIRST_NUDGE_MS);
-}
-
-function disarmIdle(reason = "") {
-  cancelIdleTimers();
-  idleArmed = false;
-  idleStep = 0;
-  idleInFlight = false;
-  if (reason) log("[SOW] idle disarmed:", reason);
-}
-
-function shouldConsiderIdle() {
-  if (!isCalling) return false;
-  if (isPlayingAI) return false;
-  if (!idleArmed) return false;
-  if (Date.now() - lastAIFinishedAt < NO_RESPONSE.ARM_DELAY_MS) return false;
-  if (Date.now() - lastUserActivityAt < 400) return false;
-  return true;
-}
-
-async function callCoachSystemEvent(eventType) {
-  const user_id = getUserIdForWebhook();
-  const device = getOrCreateDeviceId();
-
-  if (!currentCallId) {
-    try {
-      currentCallId = localStorage.getItem("last_call_id") || crypto.randomUUID();
-      localStorage.setItem("last_call_id", currentCallId);
-    } catch {
-      currentCallId =
-        currentCallId || `call_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+    playbackAC ||= new (window.AudioContext || window.webkitAudioContext)();
+    if (playbackAC.state === "suspended") {
+      await playbackAC.resume().catch(() => {});
     }
-  }
 
-  const resp = await fetch(CALL_COACH_ENDPOINT, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      source: "voice",
-      user_id,
-      device_id: device,
-      call_id: currentCallId,
-      conversationId: conversationId || null,
-      system_event: eventType,
-    }),
+    if (IS_IOS && !audioUnlocked) {
+      const a = ensureSharedAudio();
+      a.src =
+        "data:audio/mp3;base64,//uQxAAAAAAAAAAAAAAAAAAAAAAAWGluZwAAAA8AAAACAAACcQCA" +
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+      a.volume = 0;
+      await a.play().catch(() => {});
+      a.pause();
+      a.currentTime = 0;
+      a.volume = speakerMuted ? 0 : 1;
+      audioUnlocked = true;
+      log("[SOW] Audio unlocked for iOS Safari.");
+    } else {
+      audioUnlocked = true;
+    }
+  } catch (e) {
+    warn("unlockAudioSystem failed", e);
+  }
+}
+
+/** Force resume audio context before playing (iOS can suspend after async) */
+async function forceResumeAudio() {
+  try {
+    playbackAC ||= new (window.AudioContext || window.webkitAudioContext)();
+    if (playbackAC.state === "suspended") {
+      await playbackAC.resume().catch(() => {});
+    }
+    // Also attempt element play/pause to re-prime in edge cases
+    if (IS_IOS) {
+      const a = ensureSharedAudio();
+      a.muted = true;
+      a.volume = 0;
+      a.src =
+        "data:audio/mp3;base64,//uQxAAAAAAAAAAAAAAAAAAAAAAAWGluZwAAAA8AAAACAAACcQCA" +
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+      await a.play().catch(() => {});
+      a.pause();
+      a.currentTime = 0;
+      a.muted = speakerMuted;
+      a.volume = speakerMuted ? 0 : 1;
+    }
+  } catch (e) {
+    // ignore
+  }
+}
+
+/** Shared playback wrapper with retry */
+function playViaSharedPlayer(src, { limitMs = 15000, color = "#d4a373", retries = 1 } = {}) {
+  return new Promise(async (resolve) => {
+    const a = ensureSharedAudio();
+    let done = false;
+    let attempts = 0;
+
+    const settle = (ok) => {
+      if (done) return;
+      done = true;
+      a.onended = a.onerror = a.onabort = a.oncanplaythrough = null;
+      stopRing();
+      resolve(ok);
+    };
+
+    const attemptPlay = async () => {
+      attempts += 1;
+      try {
+        await forceResumeAudio();
+      } catch {}
+
+      try {
+        a.pause();
+      } catch {}
+
+      a.preload = "auto";
+      a.src = src;
+      a.muted = speakerMuted;
+      a.volume = speakerMuted ? 0 : 1;
+
+      animateRingFromElement(a, color);
+
+      const tryStart = () => {
+        try {
+          const p = a.play();
+          if (p?.catch) {
+            p.catch(async () => {
+              if (attempts <= retries) {
+                await unlockAudioSystem(); // re-unlock under iOS policy
+                return attemptPlay();
+              }
+              settle(false);
+            });
+          }
+        } catch {
+          settle(false);
+        }
+      };
+
+      a.oncanplaythrough = () => tryStart();
+      a.onerror = () => settle(false);
+      a.onabort = () => settle(false);
+
+      const t = setTimeout(() => settle(false), limitMs);
+      a.onended = () => {
+        clearTimeout(t);
+        settle(true);
+      };
+
+      // if already buffered, can play immediately
+      if (a.readyState >= 3) tryStart();
+    };
+
+    await attemptPlay();
   });
-
-  if (!resp.ok) {
-    const t = await resp.text().catch(() => "");
-    throw new Error(`call-coach system_event ${resp.status}: ${t || resp.statusText}`);
-  }
-
-  const data = await resp.json().catch(() => ({}));
-  const text = (data.assistant_text || data.text || "").toString().trim();
-  const b64 = data.audio_base64 || "";
-  const mime = data.mime || "audio/mpeg";
-
-  if (!b64) throw new Error("system_event missing audio_base64");
-  return { text, b64, mime };
 }
 
-function base64ToBlobUrl(b64, mime = "audio/mpeg") {
-  const raw = (b64 || "").includes(",") ? b64.split(",").pop() : b64;
-  const bytes = Uint8Array.from(atob(raw), (c) => c.charCodeAt(0));
-  const blob = new Blob([bytes], { type: mime || "audio/mpeg" });
-  return URL.createObjectURL(blob);
-}
-
-async function playJsonTTS({ text, b64, mime }, { ringColor = "#d4a373" } = {}) {
-  const url = base64ToBlobUrl(b64, mime);
-  try {
-    if (text) addTranscriptTurn("assistant", text);
-    await safePlayOnce(url, { limitMs: 60_000, color: ringColor });
-  } finally {
-    try {
-      URL.revokeObjectURL(url);
-    } catch {}
-  }
-}
-
-async function maybeRunNoResponseNudge() {
-  if (!shouldConsiderIdle()) return;
-  if (idleInFlight) return;
-  if (idleStep !== 0) return;
-
-  idleInFlight = true;
-
-  try {
-    statusText.textContent = "Still there…";
-    const payload = await callCoachSystemEvent("no_response_nudge");
-    if (!isCalling) return;
-
-    isPlayingAI = true;
-    await playJsonTTS(payload, { ringColor: "#d4a373" });
-  } catch (e) {
-    warn("no_response_nudge failed", e);
-  } finally {
-    isPlayingAI = false;
-    idleInFlight = false;
-    if (!isCalling) return;
-
-    if (Date.now() - lastUserActivityAt < 500) {
-      disarmIdle("user activity after nudge");
-      return;
-    }
-
-    idleStep = 1;
-    idleTimer2 = setTimeout(() => maybeRunNoResponseEnd(), NO_RESPONSE.END_CALL_MS);
-  }
-}
-
-async function maybeRunNoResponseEnd() {
-  if (!shouldConsiderIdle()) return;
-  if (idleInFlight) return;
-  if (idleStep !== 1) return;
-
-  idleInFlight = true;
-
-  try {
-    statusText.textContent = "Ending call…";
-    const payload = await callCoachSystemEvent("no_response_end");
-    if (!isCalling) return;
-
-    isPlayingAI = true;
-    await playJsonTTS(payload, { ringColor: "#d4a373" });
-  } catch (e) {
-    warn("no_response_end failed", e);
-  } finally {
-    isPlayingAI = false;
-    idleInFlight = false;
-    if (!isCalling) return;
-    endCall();
-  }
-}
-
-/* ---------- Call duration timer helpers ---------- */
-function resetCallTimer() {
-  callStartedAt = null;
-  if (callTimerInterval) {
-    clearInterval(callTimerInterval);
-    callTimerInterval = null;
-  }
-  if (callTimerEl) callTimerEl.textContent = "00:00";
-}
-
-function stopCallTimer() {
-  if (callTimerInterval) {
-    clearInterval(callTimerInterval);
-    callTimerInterval = null;
-  }
-}
-
-function updateCallTimer() {
-  if (!callTimerEl || !callStartedAt) return;
-  const elapsedSec = Math.floor((Date.now() - callStartedAt) / 1000);
-  const mins = Math.floor(elapsedSec / 60);
-  const secs = elapsedSec % 60;
-  callTimerEl.textContent = `${String(mins).padStart(2, "0")}:${String(secs).padStart(
-    2,
-    "0"
-  )}`;
-}
-
-function startCallTimer() {
-  resetCallTimer();
-  callStartedAt = Date.now();
-  updateCallTimer();
-  callTimerInterval = setInterval(updateCallTimer, 1000);
-}
-
-/* Derive a short conversation title from first user utterance */
-function deriveTitleFromText(raw) {
-  let t = (raw || "").replace(/\s+/g, " ").trim();
-  if (!t) return null;
-
-  const max = 80;
-  if (t.length > max) {
-    let cut = t.lastIndexOf(" ", max);
-    if (cut < 30) cut = max;
-    t = t.slice(0, cut);
-  }
-
-  t = t.replace(/^[^A-Za-z0-9]+/, "").replace(/[\s\-–—_,.:;!?]+$/, "");
-  if (!t) return null;
-
-  return t.charAt(0).toUpperCase() + t.slice(1);
-}
-
-async function maybeUpdateConversationTitleFromTranscript(text) {
-  if (!conversationId || conversationTitleLocked) return;
-  const title = deriveTitleFromText(text);
-  if (!title || title.length < 4) return;
-
-  try {
-    const { error } = await supabase
-      .from("conversations")
-      .update({ title })
-      .eq("id", conversationId)
-      .or("title.is.null,title.eq.New Conversation");
-
-    if (error) {
-      warn("Conversation title update error:", error);
-      return;
-    }
-    conversationTitleLocked = true;
-    log("[SOW] Conversation title set from call transcript:", title);
-  } catch (e) {
-    warn("Conversation title update failed:", e);
-  }
+/* Small one-shot clips (ring/greeting/others) */
+function safePlayOnce(src, { limitMs = 15000, color = "#d4a373" } = {}) {
+  return playViaSharedPlayer(src, { limitMs, color, retries: 1 });
 }
 
 /* ---------- History / Summary (Supabase via REST, optional) ---------- */
 async function fetchLastPairsFromSupabase(user_id, { pairs = 8 } = {}) {
-  if (!HAS_SUPABASE) return { text: "", pairs: [] };
+  if (!HAS_SUPABASE) {
+    return { text: "", pairs: [] };
+  }
   try {
     const uuid = pickUuidForHistory(user_id);
-    const url = new URL(`${SUPABASE_REST}/${encodeURIComponent(HISTORY_TABLE)}`);
+    const url = new URL(
+      `${SUPABASE_REST}/${encodeURIComponent(HISTORY_TABLE)}`
+    );
     url.searchParams.set("select", HISTORY_SELECT);
     url.searchParams.set(HISTORY_USER_COL, `eq.${uuid}`);
     url.searchParams.set("order", `${HISTORY_TIME_COL}.desc`);
@@ -580,7 +515,9 @@ async function fetchRollingSummary(user_id, device) {
   if (!HAS_SUPABASE) return "";
   try {
     const uuid = pickUuidForHistory(user_id);
-    const url = new URL(`${SUPABASE_REST}/${encodeURIComponent(SUMMARY_TABLE)}`);
+    const url = new URL(
+      `${SUPABASE_REST}/${encodeURIComponent(SUMMARY_TABLE)}`
+    );
     url.searchParams.set("user_id_uuid", `eq.${uuid}`);
     url.searchParams.set("device_id", `eq.${device}`);
     url.searchParams.set("select", "summary,last_turn_at");
@@ -595,7 +532,7 @@ async function fetchRollingSummary(user_id, device) {
     const rows = await resp.json();
     return rows?.[0]?.summary || "";
   } catch (e) {
-    warn("fetchRollingSummary failed:", e);
+    warn("fetchRollingSummary failed", e);
     return "";
   }
 }
@@ -675,7 +612,10 @@ function ensureChatUI() {
       </form>
     `;
     chatPanel.style.display = "none";
-    const anchor = document.getElementById("avatar-container") || document.body;
+    const anchor =
+      document.getElementById("transcript") ||
+      document.getElementById("avatar-container") ||
+      document.body;
     anchor.insertAdjacentElement("afterend", chatPanel);
   }
   chatLog = chatLog || document.getElementById("chat-log");
@@ -688,14 +628,30 @@ function ensureChatUI() {
       const txt = (chatInput?.value || "").trim();
       if (!txt) return;
       chatInput.value = "";
+      showChatView();
       appendMsg("me", txt);
-      noteUserActivity();
-      await sendChatToN8N(txt);
+      await sendChatToCoach(txt);
     });
     chatForm._wired = true;
   }
 }
 ensureChatUI();
+
+function showChatView() {
+  inChatView = true;
+  if (chatPanel) chatPanel.style.display = "block";
+  statusText.textContent = "Chat view on. Call continues in background.";
+  updateModeBtnUI();
+}
+
+function showCallView() {
+  inChatView = false;
+  if (chatPanel) chatPanel.style.display = "none";
+  statusText.textContent = isCalling
+    ? "Call view on."
+    : "Tap the blue call button to begin.";
+  updateModeBtnUI();
+}
 
 function appendMsg(role, text, { id, typing = false } = {}) {
   if (!chatLog) return null;
@@ -721,33 +677,26 @@ async function typewriter(el, full, delay = 24) {
   }
 }
 
-/* transcript helpers */
+/* transcript list helpers (call view) */
+let lastFinalLine = "";
 const transcriptUI = {
   clearAll() {
-    if (transcriptInterimEl) transcriptInterimEl.textContent = "";
-    if (transcriptListEl) transcriptListEl.innerHTML = "";
+    transcriptInterim.textContent = "";
+    transcriptList.innerHTML = "";
     lastFinalLine = "";
-    scrollTranscriptToBottom();
   },
-
   setInterim(t) {
-    const text = (t || "").trim();
-    if (!text) {
-      setTranscriptInterim("user", "");
-      return;
-    }
-    setTranscriptInterim("user", text);
-    noteUserActivity();
+    transcriptInterim.textContent = t || "";
   },
-
   addFinalLine(t) {
     const s = (t || "").trim();
     if (!s || s === lastFinalLine) return;
     lastFinalLine = s;
-
-    addTranscriptTurn("user", s);
-    setTranscriptInterim("user", "");
-    noteUserActivity();
+    const div = document.createElement("div");
+    div.className = "transcript-line";
+    div.textContent = s;
+    transcriptList.appendChild(div);
+    transcriptList.scrollTop = transcriptList.scrollHeight;
   },
 };
 
@@ -779,7 +728,26 @@ function drawVoiceRing(th = 9, color = "#d4a373") {
   ctx.stroke();
 }
 
+let ringCtx = null;
+let ringAnalyser = null;
+let ringRAF = null;
+
 function stopRing() {
+  if (ringRAF) cancelAnimationFrame(ringRAF);
+  ringRAF = null;
+  try {
+    ringAnalyser?.disconnect();
+  } catch (e) {
+    // ignore
+  }
+  if (ringCtx && ringCtx.state !== "closed") {
+    try {
+      ringCtx.close();
+    } catch (e) {
+      // ignore
+    }
+  }
+  ringCtx = ringAnalyser = null;
   drawVoiceRing();
 }
 
@@ -793,7 +761,11 @@ function animateRingFromElement(mediaEl, color = "#d4a373") {
 
   const start = () => {
     stop();
-    src = playbackAC.createMediaElementSource(mediaEl);
+    try {
+      src = playbackAC.createMediaElementSource(mediaEl);
+    } catch (e) {
+      return;
+    }
     gain = playbackAC.createGain();
     analyser = playbackAC.createAnalyser();
     analyser.fftSize = 1024;
@@ -802,7 +774,7 @@ function animateRingFromElement(mediaEl, color = "#d4a373") {
       src.connect(gain);
       gain.connect(analyser);
       analyser.connect(playbackAC.destination);
-    } catch {
+    } catch (e) {
       return;
     }
     const data = new Uint8Array(analyser.fftSize);
@@ -828,7 +800,9 @@ function animateRingFromElement(mediaEl, color = "#d4a373") {
       analyser?.disconnect();
       gain?.disconnect();
       src?.disconnect();
-    } catch {}
+    } catch (e) {
+      // ignore
+    }
     drawVoiceRing();
   };
 
@@ -839,7 +813,7 @@ function animateRingFromElement(mediaEl, color = "#d4a373") {
   if (!mediaEl.paused && !mediaEl.ended) start();
 }
 
-/* ---------- VAD (stop MediaRecorder after silence) ---------- */
+/* ---------- VAD (endless recording; stop after silence) ---------- */
 const VAD = {
   SILENCE_THRESHOLD: 5,
   SILENCE_TIMEOUT_MS: 3000,
@@ -861,6 +835,8 @@ function startMicVAD(stream, color = "#d4a373") {
   vadAnalyser.fftSize = 2048;
   vadAnalyser.smoothingTimeConstant = 0.75;
   vadSource.connect(vadAnalyser);
+  ringCtx = vadCtx;
+  ringAnalyser = vadAnalyser;
 
   const data = new Uint8Array(vadAnalyser.fftSize);
   const startedAt = performance.now();
@@ -915,30 +891,17 @@ function stopMicVAD() {
   try {
     vadSource?.disconnect();
     vadAnalyser?.disconnect();
-  } catch {}
+  } catch (e) {
+    // ignore
+  }
   if (vadCtx && vadCtx.state !== "closed") {
     try {
       vadCtx.close();
-    } catch {}
+    } catch (e) {
+      // ignore
+    }
   }
   vadCtx = vadAnalyser = vadSource = null;
-}
-
-/* ---------- Mic stream: get once per call (mobile reliability) ---------- */
-async function ensureMicStream() {
-  if (globalStream) return globalStream;
-
-  const stream = await navigator.mediaDevices.getUserMedia({
-    audio: {
-      echoCancellation: true,
-      noiseSuppression: true,
-      autoGainControl: true,
-    },
-  });
-
-  globalStream = stream;
-  updateMicTracks();
-  return stream;
 }
 
 /* ---------- Audio I/O helpers ---------- */
@@ -955,7 +918,7 @@ async function routeElementToPreferredOutput(el) {
   if (!preferredOutputDeviceId) return;
   try {
     await el.setSinkId(preferredOutputDeviceId);
-  } catch {}
+  } catch (e) {}
 }
 
 async function pickSpeakerOutputDevice() {
@@ -967,7 +930,7 @@ async function pickSpeakerOutputDevice() {
     if (!outs.length) return null;
     const speakerish = outs.find((d) => /speaker/i.test(d.label));
     return speakerish?.deviceId || outs.at(-1).deviceId;
-  } catch {
+  } catch (e) {
     return null;
   }
 }
@@ -979,35 +942,24 @@ function updateMicTracks() {
     });
 }
 
-// ✅ updated: also set label
 function updateSpeakerUI() {
   speakerBtn?.setAttribute("aria-pressed", String(!speakerMuted));
-  if (speakerLabel) speakerLabel.textContent = "Speaker";
 }
 
-// ✅ updated: also set label (Mute/Unmute)
 function updateMicUI() {
   micBtn?.setAttribute("aria-pressed", String(micMuted));
-  if (micLabel) micLabel.textContent = micMuted ? "Unmute" : "Mute";
 }
 
 function updateModeBtnUI() {
   if (modeBtn) {
-    modeBtn.setAttribute("aria-pressed", "false");
-    modeBtn.title = "Open this conversation in chat view";
+    modeBtn.setAttribute("aria-pressed", String(inChatView));
+    modeBtn.title = inChatView ? "Switch to Call view" : "Switch to Chat view";
   }
 }
 
-function navigateToChatThread() {
-  const params = new URLSearchParams(window.location.search);
-  const c = params.get("c");
-  const url = new URL("home.html", window.location.origin);
-  if (c) url.searchParams.set("c", c);
-  window.location.href = url.toString();
-}
-
 /* ---------- Controls ---------- */
-callBtn?.addEventListener("click", () => {
+callBtn?.addEventListener("click", async () => {
+  await unlockAudioSystem();
   if (!isCalling) startCall();
   else endCall();
 });
@@ -1028,7 +980,8 @@ speakerBtn?.addEventListener("click", async () => {
   }
   updateSpeakerUI();
   if (wasMuted && !speakerMuted && "setSinkId" in HTMLMediaElement.prototype) {
-    if (!preferredOutputDeviceId) preferredOutputDeviceId = await pickSpeakerOutputDevice();
+    if (!preferredOutputDeviceId)
+      preferredOutputDeviceId = await pickSpeakerOutputDevice();
     if (preferredOutputDeviceId) {
       for (const el of managedAudios) await routeElementToPreferredOutput(el);
       statusText.textContent = "Speaker output active.";
@@ -1036,198 +989,91 @@ speakerBtn?.addEventListener("click", async () => {
   }
 });
 
-modeBtn?.addEventListener("click", (e) => {
-  e.preventDefault();
-  navigateToChatThread();
-});
-
-threadLink?.addEventListener("click", (e) => {
-  e.preventDefault();
-  navigateToChatThread();
+modeBtn?.addEventListener("click", () => {
+  inChatView ? showCallView() : showChatView();
 });
 
 document.addEventListener("keydown", (e) => {
   if (e.key?.toLowerCase?.() === "c") {
-    e.preventDefault();
-    navigateToChatThread();
+    inChatView ? showCallView() : showChatView();
   }
 });
 
-tsClearBtn?.addEventListener("click", () => transcriptUI.clearAll());
-tsAutoScrollBtn?.addEventListener("click", () => setAutoScroll(!autoScrollOn));
-
-/* ---------- OpenAI Whisper (mobile) ---------- */
-async function transcribeWithOpenAI(blob, { model = "whisper-1", language = "en" } = {}) {
-  if (!blob || blob.size < 1000) return "";
-
-  hudStatus("transcribe: uploading");
-  hudErr("");
-  hudMsg("");
-
-  const fd = new FormData();
-  fd.append("file", blob, "audio.webm");
-  fd.append("model", model);
-  fd.append("language", language);
-
-  const resp = await fetch(OPENAI_TRANSCRIBE_ENDPOINT, { method: "POST", body: fd });
-  if (!resp.ok) {
-    const t = await resp.text().catch(() => "");
-    throw new Error(`openai-transcribe ${resp.status}: ${t || resp.statusText}`);
-  }
-  const data = await resp.json().catch(() => ({}));
-  const text = (data.text || "").toString().trim();
-  hudStatus(text ? "transcribe: ok" : "transcribe: empty");
-  hudMsg(text ? `final: ${text.slice(0, 80)}` : "");
-  return text;
-}
-
-/* ---------- Greeting (ALWAYS transcribable) ---------- */
-async function fetchGreetingJSON() {
-  const user_id = getUserIdForWebhook();
-  const device = getOrCreateDeviceId();
-
-  const resp = await fetch(GREETING_ENDPOINT, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ user_id, device_id: device }),
-  });
-
-  if (!resp.ok) {
-    const t = await resp.text().catch(() => "");
-    throw new Error(`Greeting HTTP ${resp.status}: ${t || resp.statusText}`);
-  }
-
-  const data = await resp.json().catch(() => ({}));
-  const text = (data.assistant_text || data.text || "").toString().trim();
-  const audio_base64 = data.audio_base64 || "";
-  const mime = data.mime || "audio/mpeg";
-
-  if (!text) throw new Error("Greeting missing text");
-  if (!audio_base64) throw new Error("Greeting missing audio_base64");
-
-  return { text, audio_base64, mime };
-}
-
+/* ---------- Greeting prefetch ---------- */
 async function prepareGreetingForNextCall() {
   greetingReadyPromise = (async () => {
     try {
-      const payload = await fetchGreetingJSON();
-      greetingPayload = payload;
+      const user_id = getUserIdForWebhook();
+      const device = getOrCreateDeviceId();
+      const payload = { user_id, device_id: device };
+
+      const resp = await fetch(GREETING_ENDPOINT, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+
+      if (!resp.ok) throw new Error(`Greeting HTTP ${resp.status}`);
+      const blob = await resp.blob();
+      if (!blob.size) throw new Error("Empty greeting audio blob");
 
       if (greetingAudioUrl) {
         try {
           URL.revokeObjectURL(greetingAudioUrl);
         } catch {}
       }
-      greetingAudioUrl = base64ToBlobUrl(payload.audio_base64, payload.mime);
-      log("[SOW] Greeting prefetched (JSON).");
+
+      greetingAudioUrl = URL.createObjectURL(blob);
+      log("[SOW] Greeting audio prefetched.");
       return true;
     } catch (e) {
       warn("Greeting prefetch failed", e);
-      greetingPayload = null;
-      if (greetingAudioUrl) {
-        try {
-          URL.revokeObjectURL(greetingAudioUrl);
-        } catch {}
-      }
       greetingAudioUrl = null;
       return false;
     }
   })();
 }
 
-async function ensureGreetingReadyWithRetry() {
-  if (!greetingReadyPromise) prepareGreetingForNextCall();
-
-  let ok = await greetingReadyPromise;
-  greetingReadyPromise = null;
-
-  if (ok && greetingPayload && greetingAudioUrl) return true;
-
-  await new Promise((r) => setTimeout(r, 450));
-  prepareGreetingForNextCall();
-  ok = await greetingReadyPromise;
-  greetingReadyPromise = null;
-
-  return Boolean(ok && greetingPayload && greetingAudioUrl);
-}
-
 /* ---------- Call flow ---------- */
 async function startCall() {
   if (isCalling) return;
   isCalling = true;
-
-  disarmIdle("startCall");
-  noteUserActivity();
-
-  // ✅ label + aria update
-  if (callLabel) callLabel.textContent = "End Call";
-  callBtn?.setAttribute("aria-label", "End call");
-
-  hudStatus("call starting");
-  hudErr("");
-  hudMsg("");
-
-  try {
-    currentCallId = crypto.randomUUID();
-  } catch {
-    currentCallId = `call_${Date.now()}_${Math.random().toString(36).slice(2)}`;
-  }
-  try {
-    localStorage.setItem("last_call_id", currentCallId);
-  } catch {}
+  currentCallId = crypto.randomUUID?.() || `${Date.now()}_${Math.random()}`;
 
   callBtn.classList.add("call-active");
   transcriptUI.clearAll();
-  startCallTimer();
+  showCallView();
 
   try {
     statusText.textContent = "Ringing…";
     await safePlayOnce("ring.mp3", { limitMs: 15000 });
     if (!isCalling) return;
 
-    const greetingOk = await ensureGreetingReadyWithRetry();
+    if (!greetingReadyPromise) prepareGreetingForNextCall();
+    const greetingOk = await greetingReadyPromise;
+    greetingReadyPromise = null;
+
     if (!isCalling) return;
 
-    if (!greetingOk) {
-      statusText.textContent = "Greeting failed. Please tap Call again in a moment.";
-      endCall();
-      return;
-    }
-
     statusText.textContent = "AI greeting you…";
-    if (greetingPayload?.text) addTranscriptTurn("assistant", greetingPayload.text);
-
-    if (greetingAudioUrl) {
+    if (greetingOk && greetingAudioUrl) {
       await safePlayOnce(greetingAudioUrl, { limitMs: 60000 });
       try {
         URL.revokeObjectURL(greetingAudioUrl);
       } catch {}
       greetingAudioUrl = null;
+    } else {
+      await safePlayOnce("blake.mp3", { limitMs: 15000 });
     }
 
     if (!isCalling) return;
 
-    greetingPayload = null;
     prepareGreetingForNextCall();
 
-    // ✅ Get mic stream ONCE for the call
-    statusText.textContent = "Connecting mic…";
-    await ensureMicStream();
-    if (!isCalling) return;
-
-    // begin VAD capture loop
     await startRecordingLoop();
   } catch (e) {
     warn("startCall error", e);
-    statusText.textContent = "Audio blocked or greeting failed. Tap again.";
-    resetCallTimer();
-    isCalling = false;
-    callBtn.classList.remove("call-active");
-
-    // ✅ revert label + aria on failure
-    if (callLabel) callLabel.textContent = "Start Call";
-    callBtn?.setAttribute("aria-label", "Start call");
+    statusText.textContent = "Audio blocked or missing. Tap again.";
   }
 }
 
@@ -1236,15 +1082,9 @@ function endCall() {
   isRecording = false;
   isPlayingAI = false;
 
-  disarmIdle("endCall");
-
-  // ✅ label + aria update
-  if (callLabel) callLabel.textContent = "Start Call";
-  callBtn?.setAttribute("aria-label", "Start call");
-
   callBtn.classList.remove("call-active");
   statusText.textContent = "Call ended.";
-  stopCallTimer();
+
   stopMicVAD();
   stopRing();
   stopBargeInMonitor();
@@ -1252,6 +1092,7 @@ function endCall() {
   try {
     globalStream?.getTracks().forEach((t) => t.stop());
   } catch {}
+
   globalStream = null;
 
   try {
@@ -1269,50 +1110,6 @@ function endCall() {
     } catch {}
     managedAudios.delete(el);
   }
-
-  if (greetingAudioUrl) {
-    try {
-      URL.revokeObjectURL(greetingAudioUrl);
-    } catch {}
-    greetingAudioUrl = null;
-  }
-
-  hudStatus("call ended");
-}
-
-/* Small one-shot clips (ring/greeting/etc) */
-function safePlayOnce(src, { limitMs = 15000, color = "#d4a373" } = {}) {
-  return new Promise((res) => {
-    const a = new Audio(src);
-    a.preload = "auto";
-    registerAudioElement(a);
-    animateRingFromElement(a, color);
-    let done = false;
-
-    const settle = (ok) => {
-      if (done) return;
-      done = true;
-      a.onended = a.onerror = a.onabort = a.oncanplaythrough = null;
-      stopRing();
-      res(ok);
-    };
-
-    a.oncanplaythrough = () => {
-      try {
-        a.play().catch(() => settle(false));
-      } catch {
-        settle(false);
-      }
-    };
-    a.onerror = () => settle(false);
-    a.onabort = () => settle(false);
-
-    const t = setTimeout(() => settle(false), limitMs);
-    a.onended = () => {
-      clearTimeout(t);
-      settle(true);
-    };
-  });
 }
 
 /* ---------- Continuous capture loop ---------- */
@@ -1321,24 +1118,15 @@ async function startRecordingLoop() {
     const ok = await captureOneTurn();
     if (!isCalling) break;
     if (!ok) continue;
-
     const played = await uploadRecordingAndNotify();
     if (!isCalling) break;
-
-    statusText.textContent = played ? "Your turn – I’m listening…" : "Listening again…";
+    statusText.textContent = played ? "Your turn…" : "Listening again…";
   }
 }
 
 /* ---------- One turn capture ---------- */
 let interimBuffer = "";
 let finalSegments = [];
-
-// Track last AI text to suppress “AI leakage” on mobile
-let lastAssistantText = "";
-
-// Enforce minimum “turn” length/size so we don’t send silence to Whisper
-const TURN_MIN_MS = 900;
-const TURN_MIN_BYTES = 12_000; // ~very small but filters near-silence blobs
 
 function commitInterimToFinal() {
   const t = (interimBuffer || "").trim();
@@ -1351,9 +1139,6 @@ function commitInterimToFinal() {
 }
 
 function openNativeRecognizer() {
-  // ✅ Desktop only (you said it works wonderfully there)
-  if (IS_MOBILE) return;
-
   const ASR = window.SpeechRecognition || window.webkitSpeechRecognition;
   if (!ASR) {
     transcriptUI.setInterim("Listening…");
@@ -1383,7 +1168,6 @@ function openNativeRecognizer() {
     }
     transcriptUI.setInterim(interim);
     interimBuffer = interim;
-    if (interim) noteUserActivity();
   };
 
   r.onerror = (e) => {
@@ -1397,17 +1181,13 @@ function openNativeRecognizer() {
     if (isCalling && isRecording) {
       try {
         r.start();
-      } catch (err) {
-        warn("ASR restart failed:", err);
-      }
+      } catch {}
     }
   };
 
   try {
     r.start();
-  } catch (err) {
-    warn("ASR start() threw immediately:", err);
-  }
+  } catch {}
 
   speechRecognizer = r;
 }
@@ -1420,23 +1200,31 @@ function closeNativeRecognizer() {
       r.onend = null;
       r.stop();
     }
-  } catch (e) {
-    warn("closeNativeRecognizer error", e);
-  }
+  } catch {}
 }
 
 async function captureOneTurn() {
   if (!isCalling || isRecording || isPlayingAI) return false;
-
-  statusText.textContent = "Your turn – I’m listening…";
 
   finalSegments = [];
   interimBuffer = "";
   transcriptUI.setInterim("Listening…");
 
   try {
-    // ✅ Use the call-wide mic stream
-    const stream = await ensureMicStream();
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true,
+      },
+    });
+
+    if (!isCalling) {
+      stream.getTracks().forEach((t) => t.stop());
+      return false;
+    }
+
+    globalStream = stream;
 
     let opts = {};
     if (MediaRecorder.isTypeSupported("audio/webm;codecs=opus")) {
@@ -1449,14 +1237,12 @@ async function captureOneTurn() {
 
     try {
       mediaRecorder = new MediaRecorder(stream, opts);
-    } catch {
+    } catch (e) {
       mediaRecorder = new MediaRecorder(stream);
     }
 
     recordChunks = [];
     isRecording = true;
-
-    const turnStartedAt = performance.now();
 
     mediaRecorder.ondataavailable = (e) => {
       if (e.data?.size > 0) {
@@ -1471,26 +1257,14 @@ async function captureOneTurn() {
       stopMicVAD();
       stopRing();
       transcriptUI.setInterim("");
-
-      // stop desktop recognizer per-turn
       closeNativeRecognizer();
-
       HumeRealtime.stopTurn?.();
-
-      // If the stop happened too quickly (silence), clear chunks so we don’t transcribe garbage
-      const dur = performance.now() - turnStartedAt;
-      const totalBytes = recordChunks.reduce((a, b) => a + (b?.size || 0), 0);
-      if (dur < TURN_MIN_MS || totalBytes < TURN_MIN_BYTES) {
-        recordChunks = [];
-      }
     };
 
     startMicVAD(stream, "#d4a373");
-
-    // Start captions engine (desktop only)
     openNativeRecognizer();
-
     HumeRealtime.startTurn?.(stream, vadCtx);
+
     mediaRecorder.start(TIMESLICE_MS);
 
     await new Promise((res) => {
@@ -1510,239 +1284,101 @@ async function captureOneTurn() {
   }
 }
 
-/* ---------- Mobile: suppress “AI leakage” transcripts ---------- */
-function normalizeForCompare(s) {
-  return (s || "")
-    .toLowerCase()
-    .replace(/\s+/g, " ")
-    .replace(/[^\p{L}\p{N}\s]/gu, "")
-    .trim();
-}
-
-function isLikelyLeakage(userText, assistantText) {
-  const u = normalizeForCompare(userText);
-  const a = normalizeForCompare(assistantText);
-  if (!u || !a) return false;
-  if (u === a) return true;
-  // if user text is mostly the assistant text (audio bleed-through)
-  if (a.length >= 18 && u.length >= 18) {
-    const shared = a.split(" ").filter((w) => w.length > 3 && u.includes(w)).length;
-    const aWords = a.split(" ").filter((w) => w.length > 3).length || 1;
-    const ratio = shared / aWords;
-    if (ratio >= 0.7) return true;
-  }
-  return false;
-}
-
-/* ---------- Upload turn + coach response ---------- */
-async function uploadRecordingAndNotify() {
-  if (!recordChunks?.length) return false;
-
-  // Desktop may already have Web Speech segments
-  let transcript = finalSegments.join(" ").replace(/\s+/g, " ").trim();
-
-  const mime = mediaRecorder?.mimeType || "audio/webm";
-  const blob = new Blob(recordChunks, { type: mime });
-  recordChunks = [];
-
-  // ✅ Mobile: use OpenAI Whisper if Web Speech produced nothing
-  if (IS_MOBILE && !transcript) {
-    statusText.textContent = "Transcribing…";
-    try {
-      transcript = await transcribeWithOpenAI(blob, { model: "whisper-1", language: "en" });
-
-      // Drop likely leakage of the AI's last line
-      if (transcript && isLikelyLeakage(transcript, lastAssistantText)) {
-        hudMsg("dropped: leakage");
-        transcript = "";
-      }
-
-      if (transcript) transcriptUI.addFinalLine(transcript);
-    } catch (e) {
-      warn("OpenAI transcription failed", e);
-      hudErr(`transcribe error: ${String(e?.message || e)}`);
-      hudStatus("transcribe failed");
-    }
-  }
-
-  // ✅ Don’t hard-fail the entire call if transcript is empty
-  if (!transcript) {
-    statusText.textContent = "I didn’t catch that — try again.";
-    return false;
-  }
-
-  maybeUpdateConversationTitleFromTranscript(transcript).catch(() => {});
-  noteUserActivity();
-
-  let audioUrl = "";
-  const user_id = getUserIdForWebhook();
-  const device = getOrCreateDeviceId();
-
-  if (HAS_SUPABASE) {
-    try {
-      const fileName = `${RECORDINGS_FOLDER}/${device}/${Date.now()}.webm`;
-      const { data, error } = await supabase.storage
-        .from(SUPABASE_BUCKET)
-        .upload(fileName, blob, {
-          contentType: mime,
-          upsert: false,
-        });
-
-      if (!error && data?.path) {
-        const { data: pub } = supabase.storage
-          .from(SUPABASE_BUCKET)
-          .getPublicUrl(data.path);
-        audioUrl = pub?.publicUrl || "";
-      }
-    } catch (e) {
-      warn("Storage upload failed (continuing without URL)", e);
-    }
-  }
-
-  const prevSummary = await fetchRollingSummary(user_id, device);
-  const { pairs } = await fetchLastPairsFromSupabase(user_id, { pairs: 6 });
-  const rolling_summary = buildRollingSummary(prevSummary, pairs, transcript);
-
-  const payload = {
-    source: "voice",
-    user_id,
-    device_id: device,
-    call_id: currentCallId,
-    conversationId: conversationId || null,
-    transcript: transcript,
-    user_turn: transcript,
-    rolling_summary: rolling_summary || "",
-    audio_url: audioUrl || "",
-  };
-
-  statusText.textContent = "Thinking…";
-
-  let data = null;
-  try {
-    const resp = await fetch(CALL_COACH_ENDPOINT, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-    });
-
-    if (!resp.ok) {
-      const t = await resp.text().catch(() => "");
-      throw new Error(`call-coach HTTP ${resp.status}: ${t || resp.statusText}`);
-    }
-
-    data = await resp.json().catch(() => ({}));
-  } catch (e) {
-    warn("call-coach request failed", e);
-    statusText.textContent = "Network error. Listening again…";
-    return false;
-  }
-
-  if (rolling_summary) upsertRollingSummary(user_id, device, rolling_summary).catch(() => {});
-
-  const assistant_text = (data.assistant_text || data.text || "").toString().trim();
-  if (assistant_text) {
-    lastAssistantText = assistant_text; // used to suppress mobile leakage
-    addTranscriptTurn("assistant", assistant_text);
-  }
-
-  const audio_base64 = data.audio_base64 || "";
-  const outMime = data.mime || "audio/mpeg";
-
-  if (!audio_base64) {
-    statusText.textContent = "No audio returned. Listening…";
-    lastAIFinishedAt = Date.now();
-    armIdleAfterAI();
-    return false;
-  }
-
-  const url = base64ToBlobUrl(audio_base64, outMime);
-
-  isPlayingAI = true;
-  statusText.textContent = "AI speaking…";
-
-  try {
-    await playWithBargeIn(url, { limitMs: 120000 });
-  } catch (e) {
-    warn("AI playback failed", e);
-  } finally {
-    isPlayingAI = false;
-    lastAIFinishedAt = Date.now();
-    armIdleAfterAI();
-
-    try {
-      URL.revokeObjectURL(url);
-    } catch {}
-  }
-
-  return true;
-}
-
-/* ---------- Playback with barge-in (stop AI if user speaks) ---------- */
-let bargeStream = null;
-let bargeCtx = null;
-let bargeSource = null;
-let bargeAnalyser = null;
-let bargeRAF = null;
-let bargeTriggered = false;
-
-// ✅ Less sensitive defaults
+/* ---------- BARGE-IN (interrupt during AI playback) ---------- */
 const BARGE = {
-  THRESH: 12,
-  HOLD_MS: 240,
-  IGNORE_MS: 450,
+  enable: true,
+  rmsThresh: 8,
+  holdMs: 120,
+  cooldownMs: 400,
 };
 
-function startBargeInMonitor({ ignoreMs = 0 } = {}) {
+let bargeCtx = null;
+let bargeSrc = null;
+let bargeAnalyser = null;
+let bargeRAF = null;
+let bargeArmed = false;
+let bargeSinceArm = 0;
+
+async function ensureLiveMicForBargeIn() {
+  try {
+    if (
+      globalStream &&
+      globalStream.getAudioTracks().some((t) => t.readyState === "live")
+    ) {
+      globalStream.getAudioTracks().forEach((t) => {
+        if (t.enabled === false) t.enabled = true;
+      });
+      return true;
+    }
+
+    const s = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true,
+      },
+    });
+
+    globalStream = s;
+    updateMicTracks();
+    return true;
+  } catch (e) {
+    warn("barge-in mic error", e);
+    return false;
+  }
+}
+
+function startBargeInMonitor(onInterrupt) {
   stopBargeInMonitor();
+  if (!BARGE.enable || !globalStream) return;
 
-  if (!navigator.mediaDevices?.getUserMedia) return;
+  bargeCtx = new (window.AudioContext || window.webkitAudioContext)();
+  if (bargeCtx.state === "suspended") bargeCtx.resume().catch(() => {});
+  bargeSrc = bargeCtx.createMediaStreamSource(globalStream);
+  bargeAnalyser = bargeCtx.createAnalyser();
+  bargeAnalyser.fftSize = 1024;
+  bargeAnalyser.smoothingTimeConstant = 0.8;
+  bargeSrc.connect(bargeAnalyser);
 
-  const ignoreUntil = performance.now() + (ignoreMs || 0);
+  bargeArmed = false;
+  bargeSinceArm = 0;
 
-  navigator.mediaDevices
-    .getUserMedia({ audio: true })
-    .then((s) => {
-      bargeStream = s;
-      bargeCtx = new (window.AudioContext || window.webkitAudioContext)();
-      if (bargeCtx.state === "suspended") bargeCtx.resume().catch(() => {});
-      bargeSource = bargeCtx.createMediaStreamSource(s);
-      bargeAnalyser = bargeCtx.createAnalyser();
-      bargeAnalyser.fftSize = 2048;
-      bargeAnalyser.smoothingTimeConstant = 0.7;
-      bargeSource.connect(bargeAnalyser);
+  const data = new Uint8Array(bargeAnalyser.fftSize);
+  let hold = 0;
 
-      const data = new Uint8Array(bargeAnalyser.fftSize);
+  const loop = () => {
+    if (!bargeAnalyser) return;
+    bargeAnalyser.getByteTimeDomainData(data);
 
-      // ✅ Require consecutive ms above threshold (much less false positives)
-      let streakMs = 0;
+    let sum = 0;
+    for (let i = 0; i < data.length; i++) {
+      const v = data[i] - 128;
+      sum += v * v;
+    }
+    const rms = Math.sqrt(sum / data.length);
 
-      const loop = () => {
-        if (!bargeAnalyser) return;
-
-        const now = performance.now();
-        if (now < ignoreUntil) {
-          bargeRAF = requestAnimationFrame(loop);
+    if (!bargeArmed) {
+      bargeSinceArm += 16;
+      if (bargeSinceArm >= BARGE.cooldownMs) bargeArmed = true;
+    } else {
+      if (rms > BARGE.rmsThresh) {
+        hold += 16;
+        if (hold >= BARGE.holdMs) {
+          try {
+            onInterrupt?.();
+          } catch {}
+          stopBargeInMonitor();
           return;
         }
+      } else {
+        hold = 0;
+      }
+    }
 
-        bargeAnalyser.getByteTimeDomainData(data);
-        let sum = 0;
-        for (let i = 0; i < data.length; i++) sum += Math.abs(data[i] - 128);
-        const level = sum / data.length;
+    bargeRAF = requestAnimationFrame(loop);
+  };
 
-        if (level > BARGE.THRESH) streakMs += 16;
-        else streakMs = 0;
-
-        if (streakMs >= BARGE.HOLD_MS) {
-          bargeTriggered = true;
-        }
-
-        bargeRAF = requestAnimationFrame(loop);
-      };
-
-      bargeRAF = requestAnimationFrame(loop);
-    })
-    .catch(() => {});
+  bargeRAF = requestAnimationFrame(loop);
 }
 
 function stopBargeInMonitor() {
@@ -1750,7 +1386,7 @@ function stopBargeInMonitor() {
   bargeRAF = null;
 
   try {
-    bargeSource?.disconnect();
+    bargeSrc?.disconnect();
     bargeAnalyser?.disconnect();
   } catch {}
 
@@ -1760,129 +1396,290 @@ function stopBargeInMonitor() {
     } catch {}
   }
 
-  try {
-    bargeStream?.getTracks().forEach((t) => t.stop());
-  } catch {}
-
-  bargeStream = bargeCtx = bargeSource = bargeAnalyser = null;
-  bargeTriggered = false;
+  bargeCtx = bargeSrc = bargeAnalyser = null;
 }
 
-async function playWithBargeIn(src, { limitMs = 60000 } = {}) {
-  bargeTriggered = false;
+/* Unified AI playback that supports barge-in */
+async function playAIWithBargeIn(playableUrl, { aiBlob = null, aiBubbleEl = null } = {}) {
+  return new Promise(async (resolve) => {
+    statusText.textContent = "AI replying…";
+    isPlayingAI = true;
 
-  // ✅ ignore first ~450ms so AI audio bleed doesn't trigger barge immediately
-  startBargeInMonitor({ ignoreMs: BARGE.IGNORE_MS });
-
-  return new Promise((resolve) => {
-    const a = new Audio(src);
+    const a = ensureSharedAudio();
     a.preload = "auto";
-    registerAudioElement(a);
-    animateRingFromElement(a, "#d4a373");
+    a.playsInline = true;
+    a.muted = speakerMuted;
+    a.volume = speakerMuted ? 0 : 1;
+    a.src = playableUrl;
 
-    let done = false;
+    if (!aiBubbleEl && inChatView) aiBubbleEl = appendMsg("ai", "", { typing: true });
 
-    const settle = (ok) => {
-      if (done) return;
-      done = true;
-      try {
-        a.pause();
-      } catch {}
+    const okMic = await ensureLiveMicForBargeIn();
+    let interrupted = false;
+
+    const cleanup = () => {
       stopRing();
       stopBargeInMonitor();
-      resolve(ok);
+      isPlayingAI = false;
+      resolve({ interrupted });
     };
 
-    a.oncanplaythrough = () => {
-      try {
-        a.play().catch(() => settle(false));
-      } catch {
-        settle(false);
-      }
-    };
+    animateRingFromElement(a, "#d4a373");
 
-    a.onerror = () => settle(false);
-    a.onabort = () => settle(false);
-    a.onended = () => settle(true);
+    if (okMic) {
+      startBargeInMonitor(() => {
+        interrupted = true;
+        try {
+          a.pause();
+        } catch {}
+        statusText.textContent = "Go ahead…";
+        cleanup();
+      });
+    }
 
-    const t = setTimeout(() => settle(false), limitMs);
+    try {
+      await forceResumeAudio();
+      const p = a.play();
+      if (p?.catch) p.catch(() => cleanup());
+    } catch {
+      cleanup();
+    }
 
-    const poll = () => {
-      if (done) return;
-      if (bargeTriggered) {
-        clearTimeout(t);
-        settle(true);
-        return;
-      }
-      requestAnimationFrame(poll);
-    };
-    requestAnimationFrame(poll);
+    a.onended = () => cleanup();
+    a.onerror = () => cleanup();
   });
 }
 
-/* ---------- Chat -> n8n ---------- */
-async function sendChatToN8N(message) {
-  const user_id = getUserIdForWebhook();
-  const device_id = getOrCreateDeviceId();
+/* ---------- Voice path: upload → Supabase (optional) → coach function ---------- */
+const RECENT_USER_KEEP = 12;
+let recentUserTurns = [];
 
-  const typingBubble = appendMsg("ai", "…", { typing: true });
+function base64ToBlobUrl(base64, mime = "audio/mpeg") {
+  if (!base64) return { url: null, blob: null };
+  const raw = base64.includes(",") ? base64.split(",").pop() : base64;
+  const bytes = Uint8Array.from(atob(raw), (c) => c.charCodeAt(0));
+  const blob = new Blob([bytes], { type: mime || "audio/mpeg" });
+  const url = URL.createObjectURL(blob);
+  return { url, blob };
+}
+
+async function uploadRecordingAndNotify() {
+  if (!isCalling) return false;
+
+  const finalText = finalSegments.join(" ").trim();
+  const interimText = (interimBuffer || "").trim();
+  const combinedTranscript = finalText || interimText || "";
+
+  if (combinedTranscript) {
+    recentUserTurns.push(combinedTranscript);
+    if (recentUserTurns.length > RECENT_USER_KEEP) {
+      recentUserTurns.splice(0, recentUserTurns.length - RECENT_USER_KEEP);
+    }
+  }
+
+  const user_id = getUserIdForWebhook();
+  const device = getOrCreateDeviceId();
+  const call_id = currentCallId || (currentCallId = crypto.randomUUID?.() || `${Date.now()}_${Math.random()}`);
+  const mimeType = mediaRecorder?.mimeType || "audio/webm";
+  const blob = new Blob(recordChunks, { type: mimeType });
+
+  if (!blob.size || !isCalling) {
+    statusText.textContent = "No audio captured.";
+    return false;
+  }
+
+  statusText.textContent = "Thinking…";
+
+  updateConversationFromCall(combinedTranscript).catch(() => {});
+
+  // history/summary
+  let historyPairsText = "";
+  let historyPairs = [];
+  try {
+    const hist = await fetchLastPairsFromSupabase(user_id, { pairs: 8 });
+    historyPairsText = hist.text || "";
+    historyPairs = hist.pairs || [];
+  } catch {}
+
+  const prevSummary = await fetchRollingSummary(user_id, device);
+  const rollingSummary = buildRollingSummary(prevSummary, historyPairs, combinedTranscript);
+
+  const transcriptForModel = historyPairsText
+    ? `Previous conversation (last ${Math.min(historyPairs.length, 8)} pairs), oldest→newest:\n${historyPairsText}\n\nUser now says:\n${combinedTranscript}`
+    : combinedTranscript;
+
+  // upload to storage (OPTIONAL)
+  let uploaded = false;
+  if (HAS_SUPABASE) {
+    try {
+      const ext = mimeType.includes("mp4") ? "m4a" : "webm";
+      const filePath = `${RECORDINGS_FOLDER}/${device}/${Date.now()}.${ext}`;
+      const uploadUrl = `${SUPABASE_URL}/storage/v1/object/${encodeURIComponent(SUPABASE_BUCKET)}/${filePath}`;
+      const upRes = await fetch(uploadUrl, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
+          "Content-Type": blob.type || "application/octet-stream",
+          "x-upsert": "false",
+        },
+        body: blob,
+      });
+      uploaded = upRes.ok;
+      if (!upRes.ok) warn("Supabase upload failed", upRes.status);
+    } catch (e) {
+      warn("Supabase upload error", e);
+    }
+  }
+
+  // ✅ call coach function (JSON response)
+  let aiText = "";
+  let aiPlayableUrl = null;
+  let revokeLater = null;
+  let aiBlob = null;
 
   try {
-    const resp = await fetch(N8N_WEBHOOK_URL, {
+    const payload = {
+      user_id,
+      device_id: device,
+      call_id,
+      source: "voice",
+      transcript: transcriptForModel,
+      utterance: combinedTranscript,
+      rolling_summary: rollingSummary || "",
+      audio_uploaded: uploaded,
+      conversationId: conversationId || null,
+    };
+
+    const resp = await fetch(WORKFLOW_ENDPOINT, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        user_id,
-        device_id,
-        conversationId: conversationId || null,
-        message,
-      }),
+      body: JSON.stringify(payload),
     });
 
     if (!resp.ok) {
-      const t = await resp.text().catch(() => "");
-      throw new Error(`n8n HTTP ${resp.status}: ${t || resp.statusText}`);
+      const txt = await resp.text().catch(() => "");
+      warn("coach endpoint failed", resp.status, txt);
+      statusText.textContent = "AI processing failed.";
+      return false;
     }
 
-    const data = await resp.json().catch(() => ({}));
-    const reply = (data.reply || data.text || data.output || "").toString().trim() || "…";
+    const data = await resp.json().catch(() => null);
+    aiText = data?.text || data?.assistant_text || "";
 
-    if (typingBubble) {
-      typingBubble.parentElement?.classList.remove("typing");
-      await typewriter(typingBubble, reply, 12);
-    } else {
-      appendMsg("ai", reply);
+    if (data?.audio_base64) {
+      const { url, blob: b } = base64ToBlobUrl(data.audio_base64, data?.mime || "audio/mpeg");
+      aiPlayableUrl = url;
+      aiBlob = b;
+      revokeLater = url;
     }
-
-    addTranscriptTurn("assistant", reply);
   } catch (e) {
-    warn("sendChatToN8N failed", e);
-    if (typingBubble) {
-      typingBubble.parentElement?.classList.remove("typing");
-      typingBubble.textContent = "Network error.";
+    warn("coach fetch failed", e);
+    statusText.textContent = "AI processing failed.";
+    return false;
+  }
+
+  if (!isCalling) return false;
+  if (!aiPlayableUrl) {
+    statusText.textContent = "AI processing failed (no audio).";
+    return false;
+  }
+
+  // If chat view is open, show text reply too
+  let aiBubble = null;
+  if (inChatView) {
+    aiBubble = appendMsg("ai", "", { typing: true });
+    if (aiText) await typewriter(aiBubble, aiText, 18);
+  }
+
+  const { interrupted } = await playAIWithBargeIn(aiPlayableUrl, {
+    aiBlob,
+    aiBubbleEl: aiBubble,
+  });
+
+  if (revokeLater) {
+    try {
+      URL.revokeObjectURL(revokeLater);
+    } catch {}
+  }
+
+  upsertRollingSummary(user_id, device, rollingSummary).catch(() => {});
+  return !interrupted || true;
+}
+
+/* ---------- Chat path (text → coach function) ---------- */
+async function sendChatToCoach(userText) {
+  const user_id = getUserIdForWebhook();
+  const device = getOrCreateDeviceId();
+  const call_id = currentCallId || (currentCallId = crypto.randomUUID?.() || `${Date.now()}_${Math.random()}`);
+
+  recentUserTurns.push(userText);
+  if (recentUserTurns.length > RECENT_USER_KEEP) {
+    recentUserTurns.splice(0, recentUserTurns.length - RECENT_USER_KEEP);
+  }
+
+  let historyPairsText = "";
+  let historyPairs = [];
+  try {
+    const hist = await fetchLastPairsFromSupabase(user_id, { pairs: 8 });
+    historyPairsText = hist.text || "";
+    historyPairs = hist.pairs || [];
+  } catch {}
+
+  const prevSummary = await fetchRollingSummary(user_id, device);
+  const rollingSummary = buildRollingSummary(prevSummary, historyPairs, userText);
+
+  const transcriptForModel = historyPairsText
+    ? `Previous conversation (last ${Math.min(historyPairs.length, 8)} pairs), oldest→newest:\n${historyPairsText}\n\nUser now says:\n${userText}`
+    : userText;
+
+  try {
+    const payload = {
+      user_id,
+      device_id: device,
+      call_id,
+      source: "chat",
+      transcript: transcriptForModel,
+      utterance: userText,
+      rolling_summary: rollingSummary || "",
+      conversationId: conversationId || null,
+    };
+
+    const resp = await fetch(WORKFLOW_ENDPOINT, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+
+    if (!resp.ok) {
+      const txt = await resp.text().catch(() => "");
+      warn("chat coach failed", resp.status, txt);
+      appendMsg("ai", "Sorry, I couldn’t send that just now.");
+      return;
     }
+
+    const data = await resp.json().catch(() => null);
+    const aiText = data?.text || data?.assistant_text || "";
+    const aiBubble = appendMsg("ai", "", { typing: true });
+    if (aiText) await typewriter(aiBubble, aiText, 18);
+
+    if (data?.audio_base64) {
+      const { url, blob } = base64ToBlobUrl(data.audio_base64, data?.mime || "audio/mpeg");
+      await playAIWithBargeIn(url, { aiBlob: blob, aiBubbleEl: aiBubble });
+      try { URL.revokeObjectURL(url); } catch {}
+    }
+
+    upsertRollingSummary(user_id, device, rollingSummary).catch(() => {});
+  } catch (e) {
+    warn("chat error", e);
+    appendMsg("ai", "Sorry, I couldn’t send that just now.");
   }
 }
 
 /* ---------- Boot ---------- */
-(function boot() {
-  ensureTranscriptElementsExist();
-  setAutoScroll(true);
-
-  if (threadLink && conversationId) {
-    threadLink.style.display = "";
-  }
-
-  prepareGreetingForNextCall();
-
-  // ✅ initialize labels
-  if (callLabel) callLabel.textContent = "Start Call";
-  if (speakerLabel) speakerLabel.textContent = "Speaker";
-
-  resetCallTimer();
-  updateMicUI();      // sets Mute/Unmute label
-  updateSpeakerUI();  // sets Speaker label
-  updateModeBtnUI();
-
-  renderDebugHud();
-})();
+updateMicUI();
+updateSpeakerUI();
+updateModeBtnUI();
+showCallView();
+prepareGreetingForNextCall();
+ensureSharedAudio();
+log("[SOW] call.js ready (Netlify coach + hardened iOS Safari audio)");
