@@ -10,6 +10,7 @@
 //    #transcriptList + #transcriptInterim
 // ✅ No n8n
 // ✅ Fixes Start Call crash by guarding missing DOM
+// ✅ FIX: OpenAI transcribe requires multipart field "file" + "model"
 
 const DEBUG = true;
 const log = (...a) => DEBUG && console.log("[SOW]", ...a);
@@ -368,8 +369,15 @@ async function transcribeTurn() {
     const blob = new Blob(recordChunks, { type: mime });
 
     const fd = new FormData();
-    fd.append("audio", blob, "user.webm");
-    fd.append("mime", mime);
+
+    // ✅ FIX: OpenAI expects multipart field name "file"
+    fd.append("file", blob, "user.webm");
+
+    // ✅ FIX: OpenAI requires model for transcriptions
+    fd.append("model", "whisper-1");
+
+    // optional but safe
+    fd.append("response_format", "json");
 
     const resp = await fetch(TRANSCRIBE_ENDPOINT, {
       method: "POST",
@@ -383,10 +391,7 @@ async function transcribeTurn() {
 
     const data = await resp.json().catch(() => ({}));
 
-    // common field names (depends on your function)
-    const text =
-      (data?.text || data?.transcript || data?.utterance || "").toString().trim();
-
+    const text = (data?.text || "").toString().trim();
     return text;
   } catch (e) {
     warn("transcribeTurn error", e);
