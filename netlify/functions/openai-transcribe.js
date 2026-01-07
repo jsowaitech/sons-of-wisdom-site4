@@ -1,9 +1,7 @@
 // netlify/functions/openai-transcribe.js
-// ✅ Properly adds model=whisper-1 to OpenAI transcription requests
-
-import Busboy from "busboy";
-import FormData from "form-data";
-import fetch from "node-fetch";
+// ✅ Dependency-free Whisper forwarding for Netlify
+// ✅ Adds required model=whisper-1
+// ✅ Works with multipart/form-data from the browser
 
 export async function handler(event) {
   const cors = {
@@ -25,17 +23,19 @@ export async function handler(event) {
     };
   }
 
-  const apiKey = process.env.OPENAI_API_KEY;
-  if (!apiKey) {
-    return {
-      statusCode: 500,
-      headers: { ...cors, "Content-Type": "application/json" },
-      body: JSON.stringify({ error: "Missing OPENAI_API_KEY env var" }),
-    };
-  }
-
   try {
-    const contentType = event.headers["content-type"] || event.headers["Content-Type"];
+    const apiKey = process.env.OPENAI_API_KEY;
+    if (!apiKey) {
+      return {
+        statusCode: 500,
+        headers: { ...cors, "Content-Type": "application/json" },
+        body: JSON.stringify({ error: "Missing OPENAI_API_KEY env var" }),
+      };
+    }
+
+    const contentType =
+      event.headers["content-type"] || event.headers["Content-Type"];
+
     if (!contentType?.includes("multipart/form-data")) {
       return {
         statusCode: 400,
@@ -44,53 +44,57 @@ export async function handler(event) {
       };
     }
 
-    const bb = Busboy({ headers: { "content-type": contentType } });
+    // ✅ Decode body into buffer
+    const rawBody = event.isBase64Encoded
+      ? Buffer.from(event.body, "base64")
+      : Buffer.from(event.body);
 
-    let audioBuffer = null;
-    let audioFilename = "audio.webm";
+    // ✅ We must inject model=whisper-1 into the multipart payload.
+    // BUT: easiest way is to append it as another part.
+    // So we rebuild multipart by adding a new part at the end.
 
-    bb.on("file", (name, file, info) => {
-      audioFilename = info.filename || audioFilename;
-
-      const chunks = [];
-      file.on("data", (d) => chunks.push(d));
-      file.on("end", () => {
-        audioBuffer = Buffer.concat(chunks);
-      });
-    });
-
-    await new Promise((resolve, reject) => {
-      bb.on("finish", resolve);
-      bb.on("error", reject);
-
-      const body = event.isBase64Encoded
-        ? Buffer.from(event.body, "base64")
-        : Buffer.from(event.body);
-
-      bb.end(body);
-    });
-
-    if (!audioBuffer) {
+    const boundary = contentType.split("boundary=")[1];
+    if (!boundary) {
       return {
         statusCode: 400,
         headers: { ...cors, "Content-Type": "application/json" },
-        body: JSON.stringify({ error: "No audio received" }),
+        body: JSON.stringify({ error: "Missing multipart boundary" }),
       };
     }
 
-    // ✅ Build correct OpenAI multipart body
-    const fd = new FormData();
-    fd.append("file", audioBuffer, { filename: audioFilename });
-    fd.append("model", "whisper-1"); // ✅ REQUIRED
-    fd.append("response_format", "json");
+    const boundaryText = `--${boundary}`;
+    const endBoundaryText = `--${boundary}--`;
+
+    // ✅ Add model field part before the final boundary
+    const injection =
+      `\r\n${boundaryText}\r\n` +
+      `Content-Disposition: form-data; name="model"\r\n\r\n` +
+      `whisper-1\r\n`;
+
+    // ✅ Insert injection BEFORE end boundary
+    const rawStr = rawBody.toString("latin1");
+    const idx = rawStr.lastIndexOf(endBoundaryText);
+
+    if (idx === -1) {
+      return {
+        statusCode: 400,
+        headers: { ...cors, "Content-Type": "application/json" },
+        body: JSON.stringify({ error: "Malformed multipart body" }),
+      };
+    }
+
+    const rebuilt =
+      rawStr.slice(0, idx) + injection + rawStr.slice(idx);
+
+    const finalBody = Buffer.from(rebuilt, "latin1");
 
     const resp = await fetch("https://api.openai.com/v1/audio/transcriptions", {
       method: "POST",
       headers: {
         Authorization: `Bearer ${apiKey}`,
-        ...fd.getHeaders(),
+        "Content-Type": contentType,
       },
-      body: fd,
+      body: finalBody,
     });
 
     if (!resp.ok) {
@@ -98,7 +102,10 @@ export async function handler(event) {
       return {
         statusCode: resp.status,
         headers: { ...cors, "Content-Type": "application/json" },
-        body: JSON.stringify({ error: "OpenAI transcribe failed", details: txt || resp.statusText }),
+        body: JSON.stringify({
+          error: "OpenAI transcribe failed",
+          details: txt || resp.statusText,
+        }),
       };
     }
 
@@ -112,7 +119,10 @@ export async function handler(event) {
     return {
       statusCode: 500,
       headers: { ...cors, "Content-Type": "application/json" },
-      body: JSON.stringify({ error: "Server error", details: String(e?.message || e) }),
+      body: JSON.stringify({
+        error: "Server error",
+        details: String(e?.message || e),
+      }),
     };
   }
 }
