@@ -1,12 +1,6 @@
 // netlify/functions/call-greeting.js
-// Son of Wisdom — Dynamic AI greeting (ALWAYS transcribable)
+// Son of Wisdom — Dynamic AI greeting (varied + reliable)
 // Returns JSON: { text, assistant_text, audio_base64, mime, call_id }
-//
-// This version also:
-// - Accepts call_id + conversationId in the POST body
-// - Logs the greeting into Supabase:
-//     * call_sessions (ai_text only, tied to call_id)
-//     * conversation_messages (assistant role, tied to conversationId) if provided
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -36,6 +30,14 @@ function mustHave(value, name) {
   return value;
 }
 
+function safeJsonParse(str) {
+  try {
+    return JSON.parse(str || "{}");
+  } catch {
+    return {};
+  }
+}
+
 function isUuid(v) {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
     v || ""
@@ -48,15 +50,24 @@ function pickUuidForHistory(userId) {
   return SENTINEL_UUID;
 }
 
+function randomSeed() {
+  // stable enough for randomness, not for cryptography
+  return Math.random().toString(36).slice(2) + "-" + Date.now();
+}
+
 async function openaiChat(messages, opts = {}) {
   mustHave(OPENAI_API_KEY, "OPENAI_API_KEY");
 
   const body = {
     model: OPENAI_MODEL,
     messages,
-    temperature: opts.temperature ?? 0.8,
+    temperature: opts.temperature ?? 0.9,
+    presence_penalty: opts.presence_penalty ?? 0.6,
+    frequency_penalty: opts.frequency_penalty ?? 0.5,
   };
+
   if (opts.maxTokens) body.max_tokens = opts.maxTokens;
+  if (opts.user) body.user = opts.user;
 
   const res = await fetch("https://api.openai.com/v1/chat/completions", {
     method: "POST",
@@ -137,55 +148,84 @@ async function supabaseInsert(table, rows) {
 
 exports.handler = async (event) => {
   if (event.httpMethod === "OPTIONS") {
-    return { statusCode: 204, headers: corsHeaders, body: "" };
+    return {
+      statusCode: 204,
+      headers: { ...corsHeaders, "Cache-Control": "no-store" },
+      body: "",
+    };
   }
+
   if (event.httpMethod !== "POST") {
     return {
       statusCode: 405,
-      headers: corsHeaders,
+      headers: { ...corsHeaders, "Content-Type": "application/json", "Cache-Control": "no-store" },
       body: JSON.stringify({ error: "Method not allowed" }),
     };
   }
 
   try {
-    const body = JSON.parse(event.body || "{}");
-    const userIdRaw = (body.user_id || "").toString().trim();
-    const deviceId = (body.device_id || "").toString().trim();
+    const body = safeJsonParse(event.body);
+
+    const userIdRaw = (body.user_id || body.userId || "").toString().trim();
+    const deviceId = (body.device_id || body.deviceId || "").toString().trim();
     const callId = (body.call_id || body.callId || "").toString().trim() || null;
     const conversationId =
-      (body.conversationId || body.conversation_id || body.c || "").toString().trim() ||
-      null;
+      (body.conversationId || body.conversation_id || body.c || "").toString().trim() || null;
 
-    // ---------- 1) Generate a fresh, varied greeting ----------
+    // Stronger variation controls
+    const seed = randomSeed();
+    const palette = [
+      "warm and grounded",
+      "firm and encouraging",
+      "calm and confident",
+      "direct but compassionate",
+      "steady and brotherly",
+    ];
+    const style = palette[Math.floor(Math.random() * palette.length)];
+
     const system = `
 You are AI Blake, a concise masculine Christian coach for Son of Wisdom.
-Return one short spoken greeting (1–2 sentences) that feels warm and strong, not repetitive.
-Invite the man to share what is on his heart right now.
-No markdown, no bullet points, plain text only.
-Do not say the same line every time; vary your wording.`.trim();
+Return ONE short spoken greeting (1–2 sentences).
+Tone: ${style}.
+Goal: invite the man to share what's on his heart right now.
+Rules:
+- Plain text only (no markdown)
+- No bullet points
+- Do NOT repeat common openers like "Hey man" or "What's on your heart" every time.
+- Vary wording and cadence.
+`.trim();
 
     const user = `
 Generate a fresh greeting for call mode.
 
+Seed: ${seed}
 User id: ${userIdRaw || "unknown"}
-Device id: ${deviceId || "unknown"}`.trim();
+Device id: ${deviceId || "unknown"}
+Conversation id: ${conversationId || "none"}
+`.trim();
 
+    // 1) Get greeting text
     const text = await openaiChat(
       [
         { role: "system", content: system },
         { role: "user", content: user },
       ],
-      { temperature: 0.9, maxTokens: 90 }
+      {
+        temperature: 0.95,
+        maxTokens: 90,
+        user: deviceId || userIdRaw || "sow",
+        presence_penalty: 0.7,
+        frequency_penalty: 0.7,
+      }
     );
 
-    // ---------- 2) Turn greeting into TTS audio ----------
+    // 2) TTS
     const audio = await elevenLabsTTS(text);
 
-    // ---------- 3) Log greeting into Supabase (best-effort) ----------
+    // 3) Log (best-effort)
     const nowIso = new Date().toISOString();
     const userUuid = pickUuidForHistory(userIdRaw);
 
-    // call_sessions row (assistant side only)
     if (callId) {
       await supabaseInsert(CALL_SESSIONS_TABLE, {
         call_id: callId,
@@ -199,7 +239,6 @@ Device id: ${deviceId || "unknown"}`.trim();
       });
     }
 
-    // conversation_messages rows (assistant only) for this conversation
     if (conversationId) {
       await supabaseInsert(CONVERSATION_MESSAGES_TABLE, {
         conversation_id: conversationId,
@@ -211,10 +250,10 @@ Device id: ${deviceId || "unknown"}`.trim();
       });
     }
 
-    // ---------- 4) Return JSON payload ----------
+    // 4) Return
     return {
       statusCode: 200,
-      headers: { ...corsHeaders, "Content-Type": "application/json" },
+      headers: { ...corsHeaders, "Content-Type": "application/json", "Cache-Control": "no-store" },
       body: JSON.stringify({
         text,
         assistant_text: text,
@@ -227,12 +266,12 @@ Device id: ${deviceId || "unknown"}`.trim();
     console.error("[call-greeting] error:", err);
     return {
       statusCode: 500,
-      headers: corsHeaders,
+      headers: { ...corsHeaders, "Content-Type": "application/json", "Cache-Control": "no-store" },
       body: JSON.stringify({
         error: "Server error",
-        detail: String(err),
+        detail: String(err?.message || err),
         hint:
-          "Ensure OPENAI_API_KEY, ELEVENLABS_API_KEY, ELEVENLABS_VOICE_ID, SUPABASE_URL, and SUPABASE_SERVICE_ROLE_KEY are set in Netlify env.",
+          "Ensure OPENAI_API_KEY, ELEVENLABS_API_KEY, ELEVENLABS_VOICE_ID, and Supabase env vars are set in Netlify.",
       }),
     };
   }
