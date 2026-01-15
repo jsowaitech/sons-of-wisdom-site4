@@ -2,7 +2,10 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta
+    name="viewport"
+    content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1, user-scalable=no"
+  />
   <title>Son of Wisdom — Call</title>
 
   <!-- iOS/Safari + mobile niceties -->
@@ -11,12 +14,23 @@
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
 
   <link rel="stylesheet" href="style.css" />
+
+  <!-- iOS dynamic viewport fix (prevents “UI gets bigger”) -->
+  <script>
+    (function () {
+      function setVH() {
+        document.documentElement.style.setProperty("--vh", (window.innerHeight * 0.01) + "px");
+      }
+      window.addEventListener("resize", setVH, { passive: true });
+      window.addEventListener("orientationchange", setVH, { passive: true });
+      setVH();
+    })();
+  </script>
 </head>
 
 <body class="sow-shell page-call">
   <!-- App bar -->
   <header class="appbar">
-    <!-- Back to main chat (same thread) -->
     <button
       id="btn-back-home"
       class="icon-btn"
@@ -55,15 +69,12 @@
             <img src="avatar-blake.jpg" alt="AI Blake" class="call-avatar-img" />
           </div>
 
-          <!-- Status + timer -->
           <div class="call-status">
             <span id="status-text">Tap the blue call button to begin.</span>
           </div>
           <div class="call-timer" id="call-timer">00:00</div>
 
-          <!-- ✅ Removed legacy transcript DOM entirely to prevent CSS conflicts -->
-
-          <!-- Call controls (UPDATED: labels under buttons) -->
+          <!-- Call controls -->
           <div class="call-controls labeled">
             <div class="call-control">
               <button
@@ -117,8 +128,6 @@
               Switch to Chat
             </button>
           </div>
-
-          <!-- Chat panel is injected dynamically by call.js -->
         </div>
       </section>
     </section>
@@ -145,7 +154,6 @@
           </div>
         </div>
 
-        <!-- ✅ This is the only transcript DOM call.js uses -->
         <div id="tsList" class="ts-list" style="flex:1;min-height:0;">
           <div id="transcriptList" class="transcript-list"></div>
           <div id="transcriptInterim" class="transcript-interim"></div>

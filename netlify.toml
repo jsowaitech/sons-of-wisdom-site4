@@ -1,10 +1,25 @@
 [build]
-  # No framework build, just install deps (for potential functions, etc.)
   command = "npm install"
   publish = "."
 
-# Route /api/chat requests from the browser to the Netlify Function
+# Chat (existing)
 [[redirects]]
   from = "/api/chat"
   to   = "/.netlify/functions/chat"
+  status = 200
+
+# Call endpoints (recommended)
+[[redirects]]
+  from = "/api/call/coach"
+  to   = "/.netlify/functions/call-coach"
+  status = 200
+
+[[redirects]]
+  from = "/api/call/transcribe"
+  to   = "/.netlify/functions/openai-transcribe"
+  status = 200
+
+[[redirects]]
+  from = "/api/call/greeting"
+  to   = "/.netlify/functions/call-greeting"
   status = 200
